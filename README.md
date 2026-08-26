@@ -52,3 +52,15 @@ cd ansible
 
 Password, Token, Private Key, kubeconfig credential 등 민감정보는 Repository에 저장하지 않습니다.
 
+## Collaboration Workflow
+
+기본 작업 흐름은 다음과 같습니다.
+
+Issue → Branch → Commit → Pull Request → Review → Squash Merge
+
+- 작업은 Issue 단위로 시작합니다.
+- 각 Issue마다 별도 Branch에서 작업합니다.
+- 변경 내용을 Commit하고 Pull Request를 생성합니다.
+- 팀원 1명 이상이 변경 내용을 확인하고 Review합니다.
+- 확인이 끝난 Pull Request는 Squash Merge로 main에 반영합니다.
+
