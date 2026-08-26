@@ -1,0 +1,15 @@
+haproxy_backends:
+  - name: cp-01
+    address: 192.168.51.20
+    port: 6443
+    enabled: true
+
+  - name: cp-02
+    address: 192.168.52.20
+    port: 6443
+    enabled: true
+
+  - name: cp-03
+    address: 192.168.53.20
+    port: 6443
+    enabled: true

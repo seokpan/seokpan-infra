@@ -1,0 +1,11 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Install and configure containerd on Kubernetes nodes
+
+- name: Configure container runtime on Kubernetes nodes
+  hosts: control_planes:workers
+  gather_facts: true
+  roles:
+    - container_runtime

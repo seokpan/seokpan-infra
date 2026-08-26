@@ -1,0 +1,109 @@
+# ============================================================
+# Secrets / Credentials
+# ============================================================
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Generic credential files
+credentials
+credentials.*
+*credentials*
+*credential*
+
+# Password files
+*password*
+*passwd*
+
+# Secret directories
+secrets/
+**/secrets/
+
+# Secret files
+secret.yml
+secret.yaml
+secrets.yml
+secrets.yaml
+
+# Ansible Vault password / local secret material
+.vault_pass
+.vault_password
+vault_pass
+vault_password
+vault-password*
+*.vault-password
+
+# SSH private keys
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+id_dsa
+id_dsa.*
+
+# Generic private keys / certificates containing private material
+*.key
+*.pem
+*.p12
+*.pfx
+*.pkcs12
+*.jks
+*.keystore
+
+# Kubernetes credentials
+kubeconfig
+kubeconfig.*
+*kubeconfig*
+
+# Cloud / API credential files
+.aws/
+.azure/
+.gcp/
+google-credentials*.json
+service-account*.json
+
+# ============================================================
+# Ansible Runtime / Temporary Files
+# ============================================================
+
+.ansible/
+*.retry
+*.retry.*
+
+# ============================================================
+# Logs / Dumps / Generated Data
+# ============================================================
+
+*.log
+*.dump
+*.sql
+*.bak
+*.backup
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# ============================================================
+# Temporary / Editor Files
+# ============================================================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+.vscode/
+.idea/
+
+# ============================================================
+# OS Metadata
+# ============================================================
+
+.DS_Store
+Thumbs.db

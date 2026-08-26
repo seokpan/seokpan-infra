@@ -1,0 +1,10 @@
+---
+- name: Reload firewalld
+  ansible.builtin.command:
+    cmd: firewall-cmd --reload
+
+
+- name: Restart HAProxy
+  ansible.builtin.service:
+    name: "{{ haproxy_service }}"
+    state: restarted

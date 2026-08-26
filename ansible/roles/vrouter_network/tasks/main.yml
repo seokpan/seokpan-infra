@@ -1,0 +1,443 @@
+---
+# ============================================================
+# 1. 기본 변수 및 입력값 검증
+# ============================================================
+
+- name: Verify static_routes variable
+  ansible.builtin.assert:
+    that:
+      - static_routes is defined
+      - static_routes is iterable
+      - static_routes | length > 0
+    fail_msg: >-
+      static_routes is not defined or empty for {{ inventory_hostname }}.
+
+
+# ============================================================
+# 2. VRouter NIC 자동 탐지
+# ============================================================
+
+- name: Gather network facts
+  ansible.builtin.setup:
+    gather_subset:
+      - network
+
+
+# ------------------------------------------------------------
+# 내부 NIC 후보 탐색
+# 192.168.51.10 ~ 192.168.54.10
+# ------------------------------------------------------------
+
+- name: Find internal interface candidates
+  ansible.builtin.set_fact:
+    internal_interface_candidates: >-
+      {{
+        ansible_facts
+        | dict2items
+        | selectattr('value', 'mapping')
+        | selectattr('value.ipv4', 'defined')
+        | selectattr(
+            'value.ipv4.address',
+            'match',
+            '^192\.168\.5[1-4]\.10$'
+          )
+        | map(attribute='value.device')
+        | list
+      }}
+
+
+# ------------------------------------------------------------
+# 외부 NIC 후보 탐색
+# Inventory의 ansible_host IP와 동일한 NIC
+# ------------------------------------------------------------
+
+- name: Find external interface candidates
+  ansible.builtin.set_fact:
+    external_interface_candidates: >-
+      {{
+        ansible_facts
+        | dict2items
+        | selectattr('value', 'mapping')
+        | selectattr('value.ipv4', 'defined')
+        | selectattr(
+            'value.ipv4.address',
+            'equalto',
+            ansible_host
+          )
+        | map(attribute='value.device')
+        | list
+      }}
+
+
+# ------------------------------------------------------------
+# 후보 개수 검증
+# ------------------------------------------------------------
+
+- name: Verify interface candidate counts
+  ansible.builtin.assert:
+    that:
+      - internal_interface_candidates | length == 1
+      - external_interface_candidates | length == 1
+    fail_msg: >-
+      Interface auto detection failed on {{ inventory_hostname }}.
+      internal candidates={{ internal_interface_candidates }}
+      external candidates={{ external_interface_candidates }}
+
+
+# ------------------------------------------------------------
+# 내부/외부 NIC가 서로 다른지 검증
+# ------------------------------------------------------------
+
+- name: Verify internal and external interfaces are different
+  ansible.builtin.assert:
+    that:
+      - internal_interface_candidates[0] != external_interface_candidates[0]
+    fail_msg: >-
+      Internal and external interfaces are identical.
+      interface={{ internal_interface_candidates[0] }}
+
+
+# ------------------------------------------------------------
+# 실제 사용할 NIC 변수 생성
+# ------------------------------------------------------------
+
+- name: Set detected interface variables
+  ansible.builtin.set_fact:
+    internal_interface: "{{ internal_interface_candidates[0] }}"
+    external_interface: "{{ external_interface_candidates[0] }}"
+
+
+# ------------------------------------------------------------
+# 탐지 결과 출력
+# ------------------------------------------------------------
+
+- name: Show detected interfaces
+  ansible.builtin.debug:
+    msg:
+      - "Host: {{ inventory_hostname }}"
+      - "External IP: {{ ansible_host }}"
+      - "External interface: {{ external_interface }}"
+      - "Internal interface: {{ internal_interface }}"
+
+
+# ============================================================
+# 3. 외부 NIC의 NetworkManager Connection 자동 탐지
+# ============================================================
+
+- name: Detect external NetworkManager connection
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - GENERAL.CONNECTION
+      - device
+      - show
+      - "{{ external_interface }}"
+  register: external_connection_result
+  changed_when: false
+
+
+- name: Verify external NetworkManager connection
+  ansible.builtin.assert:
+    that:
+      - external_connection_result.rc == 0
+      - external_connection_result.stdout | trim | length > 0
+      - external_connection_result.stdout | trim != "--"
+    fail_msg: >-
+      NetworkManager connection detection failed.
+      host={{ inventory_hostname }}
+      external interface={{ external_interface }}
+
+
+- name: Set external connection variable
+  ansible.builtin.set_fact:
+    external_connection: "{{ external_connection_result.stdout | trim }}"
+
+
+- name: Show external NetworkManager connection
+  ansible.builtin.debug:
+    msg:
+      - "External interface: {{ external_interface }}"
+      - "External connection: {{ external_connection }}"
+
+
+# ============================================================
+# 4. IPv4 Forwarding 영구 설정
+# ============================================================
+
+- name: Configure IPv4 forwarding permanently
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-vrouter.conf
+    content: |
+      net.ipv4.ip_forward = {{ ipv4_forwarding }}
+    owner: root
+    group: root
+    mode: "0644"
+
+
+# ============================================================
+# 5. IPv4 Forwarding Runtime 확인
+# ============================================================
+
+- name: Read current IPv4 forwarding status
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -n
+      - net.ipv4.ip_forward
+  register: ip_forward_before
+  changed_when: false
+
+
+# ============================================================
+# 6. IPv4 Forwarding Runtime 적용
+# ============================================================
+
+- name: Enable IPv4 forwarding at runtime
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -w
+      - "net.ipv4.ip_forward={{ ipv4_forwarding }}"
+  when: ip_forward_before.stdout | trim != ipv4_forwarding
+
+
+# ============================================================
+# 7. IPv4 Forwarding 최종 검증
+# ============================================================
+
+- name: Read IPv4 forwarding status after configuration
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -n
+      - net.ipv4.ip_forward
+  register: ip_forward_after
+  changed_when: false
+
+
+- name: Verify IPv4 forwarding
+  ansible.builtin.assert:
+    that:
+      - ip_forward_after.stdout | trim == ipv4_forwarding
+    fail_msg: >-
+      IPv4 forwarding verification failed.
+      expected={{ ipv4_forwarding }}
+      actual={{ ip_forward_after.stdout | trim }}
+    success_msg: "IPv4 forwarding is enabled."
+
+
+# ============================================================
+# 8. 현재 Runtime Static Route 조회
+# ============================================================
+
+- name: Read current runtime static routes
+  ansible.builtin.command:
+    argv:
+      - ip
+      - route
+      - show
+      - "{{ item.network }}"
+  loop: "{{ static_routes }}"
+  loop_control:
+    label: "{{ item.network }}"
+  register: runtime_route_checks
+  changed_when: false
+  failed_when: false
+
+
+# ============================================================
+# 9. Runtime Static Route 적용
+# ============================================================
+
+- name: Configure runtime static routes
+  ansible.builtin.command:
+    argv:
+      - ip
+      - route
+      - replace
+      - "{{ item.item.network }}"
+      - via
+      - "{{ item.item.gateway }}"
+      - dev
+      - "{{ external_interface }}"
+  loop: "{{ runtime_route_checks.results }}"
+  loop_control:
+    label: "{{ item.item.network }} via {{ item.item.gateway }}"
+  when: >
+    item.item.network not in item.stdout
+    or ('via ' ~ item.item.gateway) not in item.stdout
+    or ('dev ' ~ external_interface) not in item.stdout
+
+
+# ============================================================
+# 10. Persistent Static Route 문자열 생성
+# ============================================================
+
+- name: Build desired persistent route list
+  ansible.builtin.set_fact:
+    desired_persistent_routes: >-
+      {%- for route in static_routes -%}
+      {{ route.network }} {{ route.gateway }}{% if not loop.last %},{% endif %}
+      {%- endfor -%}
+
+
+# ============================================================
+# 11. 현재 Persistent Static Route 조회
+# ============================================================
+
+- name: Read current persistent routes
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.routes
+      - connection
+      - show
+      - "{{ external_connection }}"
+  register: current_persistent_routes
+  changed_when: false
+
+
+# ============================================================
+# 12. Persistent Static Route 저장
+#
+# 외부 Connection의 Static Route 목록을
+# Ansible이 원하는 상태로 설정
+#
+# nmcli connection up은 실행하지 않음
+# SSH 단절 방지
+# ============================================================
+
+- name: Configure persistent static routes
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ external_connection }}"
+      - ipv4.routes
+      - "{{ desired_persistent_routes }}"
+
+
+# ============================================================
+# 13. Runtime Routing Table 최종 조회
+# ============================================================
+
+- name: Read routing table
+  ansible.builtin.command:
+    argv:
+      - ip
+      - route
+  register: routing_table
+  changed_when: false
+
+
+- name: Show routing table
+  ansible.builtin.debug:
+    var: routing_table.stdout_lines
+
+
+# ============================================================
+# 14. Runtime Static Route 개별 조회
+# ============================================================
+
+- name: Read configured runtime routes
+  ansible.builtin.command:
+    argv:
+      - ip
+      - route
+      - show
+      - "{{ item.network }}"
+  loop: "{{ static_routes }}"
+  loop_control:
+    label: "{{ item.network }}"
+  register: configured_runtime_routes
+  changed_when: false
+
+
+# ============================================================
+# 15. Runtime Static Route 정확성 검증
+# ============================================================
+
+- name: Verify runtime static routes
+  ansible.builtin.assert:
+    that:
+      - item.item.network in item.stdout
+      - ('via ' ~ item.item.gateway) in item.stdout
+      - ('dev ' ~ external_interface) in item.stdout
+    fail_msg: >-
+      Runtime static route verification failed.
+      network={{ item.item.network }}
+      gateway={{ item.item.gateway }}
+      interface={{ external_interface }}
+      actual={{ item.stdout }}
+    success_msg: >-
+      Runtime static route verified.
+      {{ item.item.network }} via {{ item.item.gateway }}
+      dev {{ external_interface }}
+  loop: "{{ configured_runtime_routes.results }}"
+  loop_control:
+    label: "{{ item.item.network }} via {{ item.item.gateway }}"
+
+
+# ============================================================
+# 16. Persistent Static Route 최종 조회
+# ============================================================
+
+- name: Read persistent routes after configuration
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.routes
+      - connection
+      - show
+      - "{{ external_connection }}"
+  register: persistent_routes_after
+  changed_when: false
+
+
+- name: Show persistent routes
+  ansible.builtin.debug:
+    var: persistent_routes_after.stdout_lines
+
+
+# ============================================================
+# 17. Persistent Static Route 검증
+# ============================================================
+
+- name: Verify persistent static routes
+  ansible.builtin.assert:
+    that:
+      - item.network in persistent_routes_after.stdout
+      - item.gateway in persistent_routes_after.stdout
+    fail_msg: >-
+      Persistent static route verification failed.
+      network={{ item.network }}
+      gateway={{ item.gateway }}
+      connection={{ external_connection }}
+    success_msg: >-
+      Persistent static route verified.
+      {{ item.network }} via {{ item.gateway }}
+  loop: "{{ static_routes }}"
+  loop_control:
+    label: "{{ item.network }} via {{ item.gateway }}"
+
+
+# ============================================================
+# 18. 최종 설정 요약
+# ============================================================
+
+- name: Show VRouter network configuration summary
+  ansible.builtin.debug:
+    msg:
+      - "========================================"
+      - "Host: {{ inventory_hostname }}"
+      - "External IP: {{ ansible_host }}"
+      - "External NIC: {{ external_interface }}"
+      - "Internal NIC: {{ internal_interface }}"
+      - "External NetworkManager connection: {{ external_connection }}"
+      - "IPv4 forwarding: {{ ip_forward_after.stdout | trim }}"
+      - "Static route count: {{ static_routes | length }}"
+      - "========================================"

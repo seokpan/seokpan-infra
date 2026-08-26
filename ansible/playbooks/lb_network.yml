@@ -1,0 +1,7 @@
+---
+- name: Configure Load Balancer Network
+  hosts: loadbalancer
+  become: true
+
+  roles:
+    - lb_network

@@ -1,0 +1,8 @@
+---
+external_zone: external
+internal_zone: internal
+
+int_to_ext_policy: int-to-ext
+ext_to_int_policy: ext-to-int
+
+private_network: 192.168.0.0/16

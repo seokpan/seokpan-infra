@@ -1,0 +1,7 @@
+---
+- name: Configure VRouter network
+  hosts: vrouters
+  become: true
+
+  roles:
+    - vrouter_network

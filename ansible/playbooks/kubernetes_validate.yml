@@ -1,0 +1,139 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Validate Kubernetes nodes before kubeadm bootstrap
+
+- name: Pre-cluster validation
+  hosts: control_planes:workers
+  gather_facts: true
+
+  tasks:
+
+    # --------------------------------------------------------
+    # Swap
+    # --------------------------------------------------------
+    - name: Check swap
+      ansible.builtin.shell: swapon --noheadings | wc -l
+      register: swap_count
+      changed_when: false
+
+    - name: Assert swap is disabled
+      ansible.builtin.assert:
+        that:
+          - swap_count.stdout | int == 0
+        fail_msg: "Swap is still enabled on {{ inventory_hostname }}"
+
+    # --------------------------------------------------------
+    # Kernel / sysctl
+    # --------------------------------------------------------
+    - name: Check required kernel modules
+      ansible.builtin.shell: |
+        lsmod | grep -q '^overlay'
+        lsmod | grep -q '^br_netfilter'
+      changed_when: false
+
+    - name: Read IPv4 forwarding
+      ansible.builtin.command: sysctl -n net.ipv4.ip_forward
+      register: ip_forward
+      changed_when: false
+
+    - name: Read bridge iptables setting
+      ansible.builtin.command: sysctl -n net.bridge.bridge-nf-call-iptables
+      register: bridge_iptables
+      changed_when: false
+
+    - name: Assert Kubernetes sysctl values
+      ansible.builtin.assert:
+        that:
+          - ip_forward.stdout == "1"
+          - bridge_iptables.stdout == "1"
+
+    # --------------------------------------------------------
+    # containerd
+    # --------------------------------------------------------
+    - name: Check containerd service
+      ansible.builtin.command: systemctl is-active containerd
+      register: containerd_active
+      changed_when: false
+
+    - name: Check containerd version
+      ansible.builtin.command: containerd --version
+      register: containerd_version_result
+      changed_when: false
+
+    - name: Check containerd socket
+      ansible.builtin.stat:
+        path: /run/containerd/containerd.sock
+      register: containerd_socket
+
+    - name: Assert container runtime state
+      ansible.builtin.assert:
+        that:
+          - containerd_active.stdout == "active"
+          - "'v2.3.3' in containerd_version_result.stdout"
+          - containerd_socket.stat.exists
+
+    # --------------------------------------------------------
+    # Kubernetes binaries
+    # --------------------------------------------------------
+    - name: Check kubeadm version
+      ansible.builtin.command: kubeadm version -o short
+      register: kubeadm_version_result
+      changed_when: false
+
+    - name: Check kubelet version
+      ansible.builtin.command: kubelet --version
+      register: kubelet_version_result
+      changed_when: false
+
+    - name: Check kubectl version
+      ansible.builtin.shell: kubectl version --client --output=yaml | grep gitVersion
+      register: kubectl_version_result
+      changed_when: false
+
+    - name: Assert Kubernetes versions
+      ansible.builtin.assert:
+        that:
+          - kubeadm_version_result.stdout == "v1.36.2"
+          - "'v1.36.2' in kubelet_version_result.stdout"
+          - "'v1.36.2' in kubectl_version_result.stdout"
+
+    # --------------------------------------------------------
+    # kubelet enable
+    # --------------------------------------------------------
+    - name: Check kubelet enabled
+      ansible.builtin.command: systemctl is-enabled kubelet
+      register: kubelet_enabled
+      changed_when: false
+
+    - name: Assert kubelet enabled
+      ansible.builtin.assert:
+        that:
+          - kubelet_enabled.stdout == "enabled"
+
+    # --------------------------------------------------------
+    # Host identity / routing
+    # --------------------------------------------------------
+    - name: Show node network information
+      ansible.builtin.shell: |
+        echo "HOST=$(hostname)"
+        echo "IP={{ ansible_default_ipv4.address }}"
+        echo "GW={{ ansible_default_ipv4.gateway | default('none') }}"
+      register: node_network
+      changed_when: false
+
+    - name: Display validation summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ node_network.stdout_lines }}"
+          - "containerd={{ containerd_version_result.stdout }}"
+          - "kubeadm={{ kubeadm_version_result.stdout }}"
+          - "PRE_CLUSTER_GATE=PASS"
+
+
+# ============================================================
+# 05-2. Syntax Check
+# ============================================================
+
+# 여기까지 파일 작성 후 아래 실행

@@ -1,0 +1,209 @@
+---
+# ============================================================
+# 1. 필수 변수 확인
+# ============================================================
+
+- name: Verify HAProxy variables
+  ansible.builtin.assert:
+    that:
+      - haproxy_bind_address is defined
+      - haproxy_workers is defined
+      - haproxy_http_nodeport is defined
+      - haproxy_https_nodeport is defined
+      - haproxy_control_planes is defined
+      - haproxy_maxscale is defined
+      - haproxy_firewall_ports is defined
+    fail_msg: >-
+      Required HAProxy variables are missing
+      for {{ inventory_hostname }}.
+
+
+# ============================================================
+# 2. HAProxy 설치
+# ============================================================
+
+- name: Install HAProxy
+  ansible.builtin.dnf:
+    name: "{{ haproxy_package }}"
+    state: present
+
+
+# ============================================================
+# 3. firewalld 확인 및 실행
+# ============================================================
+
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+
+
+- name: Enable and start firewalld
+  ansible.builtin.service:
+    name: firewalld
+    enabled: true
+    state: started
+
+
+# ============================================================
+# 4. SELinux
+# ============================================================
+
+- name: Check haproxy_connect_any SELinux boolean
+  ansible.builtin.command:
+    cmd: getsebool haproxy_connect_any
+  register: haproxy_selinux
+  changed_when: false
+  failed_when: false
+
+
+- name: Enable HAProxy backend connections in SELinux
+  ansible.builtin.command:
+    cmd: setsebool -P haproxy_connect_any on
+  when:
+    - haproxy_selinux.rc == 0
+    - "'--> on' not in haproxy_selinux.stdout"
+
+
+# ============================================================
+# 5. Runtime Firewall Port 확인
+# ============================================================
+
+- name: Check HAProxy runtime firewall ports
+  ansible.builtin.command:
+    cmd: firewall-cmd --query-port={{ item }}/tcp
+  loop: "{{ haproxy_firewall_ports }}"
+  register: haproxy_runtime_firewall_check
+  changed_when: false
+  failed_when: false
+
+
+# ============================================================
+# 6. Runtime Firewall Port 열기
+# ============================================================
+
+- name: Open HAProxy runtime firewall ports
+  ansible.builtin.command:
+    cmd: firewall-cmd --add-port={{ item.item }}/tcp
+  loop: "{{ haproxy_runtime_firewall_check.results }}"
+  when: item.rc != 0
+
+
+# ============================================================
+# 7. Permanent Firewall 확인
+# ============================================================
+
+- name: Check HAProxy permanent firewall ports
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --query-port={{ item }}/tcp
+  loop: "{{ haproxy_firewall_ports }}"
+  register: haproxy_permanent_firewall_check
+  changed_when: false
+  failed_when: false
+
+
+# ============================================================
+# 8. Permanent Firewall Port 열기
+# ============================================================
+
+- name: Open HAProxy firewall ports permanently
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port={{ item.item }}/tcp
+  loop: "{{ haproxy_permanent_firewall_check.results }}"
+  when: item.rc != 0
+  notify: Reload firewalld
+
+
+# ============================================================
+# 9. HAProxy 설정 파일 배포
+#
+# 배포 전에 haproxy -c로 문법 확인
+# ============================================================
+
+- name: Deploy HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: "{{ haproxy_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/haproxy -c -f %s"
+  notify: Restart HAProxy
+
+
+# ============================================================
+# 10. HAProxy 서비스 시작
+# ============================================================
+
+- name: Enable and start HAProxy
+  ansible.builtin.service:
+    name: "{{ haproxy_service }}"
+    enabled: true
+    state: started
+
+
+# ============================================================
+# 11. Handler 즉시 적용
+# ============================================================
+
+- name: Apply pending handlers
+  ansible.builtin.meta: flush_handlers
+
+
+# ============================================================
+# 12. HAProxy 서비스 최종 확인
+# ============================================================
+
+- name: Check HAProxy service
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ haproxy_service }}
+  register: haproxy_service_status
+  changed_when: false
+  failed_when: false
+
+
+- name: Verify HAProxy service is active
+  ansible.builtin.assert:
+    that:
+      - haproxy_service_status.stdout | trim == "active"
+    fail_msg: "HAProxy service is not active."
+    success_msg: "HAProxy service is active."
+
+
+# ============================================================
+# 13. Listener 확인
+# ============================================================
+
+- name: Read HAProxy listening ports
+  ansible.builtin.command:
+    cmd: ss -lnt
+  register: haproxy_listeners
+  changed_when: false
+
+
+- name: Verify Kubernetes API listener
+  ansible.builtin.assert:
+    that:
+      - (haproxy_bind_address ~ ':6443') in haproxy_listeners.stdout
+    fail_msg: >-
+      HAProxy is not listening on
+      {{ haproxy_bind_address }}:6443.
+    success_msg: >-
+      HAProxy is listening on
+      {{ haproxy_bind_address }}:6443.
+
+
+# ============================================================
+# 14. 최종 상태 출력
+# ============================================================
+
+- name: Display HAProxy summary
+  ansible.builtin.debug:
+    msg:
+      - "HAProxy VIP = {{ haproxy_bind_address }}"
+      - "HTTP = {{ haproxy_bind_address }}:80"
+      - "HTTPS = {{ haproxy_bind_address }}:443"
+      - "Kubernetes API = {{ haproxy_bind_address }}:6443"
+      - "MariaDB = {{ haproxy_bind_address }}:3306"
+      - "HAProxy Service = {{ haproxy_service_status.stdout | trim }}"
+      

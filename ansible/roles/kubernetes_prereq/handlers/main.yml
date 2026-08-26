@@ -1,0 +1,9 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Kubernetes prerequisite handlers
+
+- name: Reload sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: true

@@ -1,0 +1,11 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Kubernetes prerequisite default variables
+
+kubernetes_minor_version: "v1.36"
+kubernetes_version: "1.36.2"
+
+kubernetes_repo_baseurl: "https://pkgs.k8s.io/core:/stable:/v1.36/rpm/"
+kubernetes_repo_gpgkey: "https://pkgs.k8s.io/core:/stable:/v1.36/rpm/repodata/repomd.xml.key"

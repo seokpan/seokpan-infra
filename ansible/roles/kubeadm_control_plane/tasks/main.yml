@@ -1,0 +1,21 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: kubeadm control plane bootstrap
+
+- name: Ensure Kubernetes configuration directory exists
+  ansible.builtin.file:
+    path: "{{ kubeadm_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy kubeadm configuration
+  ansible.builtin.template:
+    src: kubeadm-config.yaml.j2
+    dest: "{{ kubeadm_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"

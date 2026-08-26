@@ -1,0 +1,17 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: kubeadm control plane default variables
+
+kubernetes_version: "v1.36.2"
+
+control_plane_endpoint: "10.1.93.90:6443"
+
+pod_network_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+
+containerd_socket: "unix:///run/containerd/containerd.sock"
+
+kubeadm_config_dir: "/etc/kubernetes"
+kubeadm_config_file: "/etc/kubernetes/kubeadm-config.yaml"

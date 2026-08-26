@@ -1,0 +1,446 @@
+---
+# ============================================================
+# 1. firewalld 설치 및 실행
+# ============================================================
+
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+
+- name: Enable and start firewalld
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+
+
+# ============================================================
+# 2. VRouter NIC 자동 탐지
+#
+# 외부 NIC:
+#   Inventory의 ansible_host IP가 설정된 NIC
+#
+# 내부 NIC:
+#   192.168.51.10 ~ 192.168.54.10 IP가 설정된 NIC
+# ============================================================
+
+- name: Gather network facts
+  ansible.builtin.setup:
+    gather_subset:
+      - network
+
+
+# ------------------------------------------------------------
+# 내부 NIC 후보 검색
+# ------------------------------------------------------------
+
+- name: Find internal interface candidates
+  ansible.builtin.set_fact:
+    internal_interface_candidates: >-
+      {{
+        ansible_facts
+        | dict2items
+        | selectattr('value', 'mapping')
+        | selectattr('value.ipv4', 'defined')
+        | selectattr(
+            'value.ipv4.address',
+            'match',
+            '^192\.168\.5[1-4]\.10$'
+          )
+        | map(attribute='value.device')
+        | list
+      }}
+
+
+# ------------------------------------------------------------
+# 외부 NIC 후보 검색
+# Inventory의 ansible_host와 정확히 같은 IP를 가진 NIC
+# ------------------------------------------------------------
+
+- name: Find external interface candidates
+  ansible.builtin.set_fact:
+    external_interface_candidates: >-
+      {{
+        ansible_facts
+        | dict2items
+        | selectattr('value', 'mapping')
+        | selectattr('value.ipv4', 'defined')
+        | selectattr(
+            'value.ipv4.address',
+            'equalto',
+            ansible_host
+          )
+        | map(attribute='value.device')
+        | list
+      }}
+
+
+# ------------------------------------------------------------
+# NIC 탐지 결과 검증
+# ------------------------------------------------------------
+
+- name: Verify detected interface candidates
+  ansible.builtin.assert:
+    that:
+      - internal_interface_candidates | length == 1
+      - external_interface_candidates | length == 1
+      - internal_interface_candidates[0] != external_interface_candidates[0]
+    fail_msg: >-
+      Interface auto detection failed.
+      internal candidates={{ internal_interface_candidates }}
+      external candidates={{ external_interface_candidates }}
+
+
+# ------------------------------------------------------------
+# 실제 사용할 NIC 변수 생성
+# ------------------------------------------------------------
+
+- name: Set detected interface variables
+  ansible.builtin.set_fact:
+    internal_interface: "{{ internal_interface_candidates[0] }}"
+    external_interface: "{{ external_interface_candidates[0] }}"
+
+
+# ------------------------------------------------------------
+# 탐지 결과 출력
+# ------------------------------------------------------------
+
+- name: Show detected interfaces
+  ansible.builtin.debug:
+    msg:
+      - "Host: {{ inventory_hostname }}"
+      - "External IP: {{ ansible_host }}"
+      - "External interface: {{ external_interface }}"
+      - "Internal interface: {{ internal_interface }}"
+
+
+# ============================================================
+# 3. firewalld 설정
+# ============================================================
+
+- name: Configure firewalld
+  vars:
+    firewalld_interfaces:
+      - interface: "{{ external_interface }}"
+        zone: "{{ external_zone }}"
+
+      - interface: "{{ internal_interface }}"
+        zone: "{{ internal_zone }}"
+
+    firewalld_policies:
+      - name: "{{ int_to_ext_policy }}"
+        ingress_zone: "{{ internal_zone }}"
+        egress_zone: "{{ external_zone }}"
+        target: ACCEPT
+
+      - name: "{{ ext_to_int_policy }}"
+        ingress_zone: "{{ external_zone }}"
+        egress_zone: "{{ internal_zone }}"
+        target: ACCEPT
+
+    selective_masquerade_rule: >-
+      rule family="ipv4" destination not address="{{ private_network }}" masquerade
+
+  block:
+
+    # ========================================================
+    # 3-1. SSH 연결 보호 - Runtime
+    #
+    # 현재 실행 중인 방화벽에 먼저 SSH 허용
+    # ========================================================
+
+    - name: Check SSH service on external zone at runtime
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - "--zone={{ external_zone }}"
+          - --query-service=ssh
+      register: external_ssh_runtime_check
+      changed_when: false
+      failed_when: external_ssh_runtime_check.rc not in [0, 1]
+
+    - name: Allow SSH service on external zone at runtime
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - "--zone={{ external_zone }}"
+          - --add-service=ssh
+      when: external_ssh_runtime_check.rc == 1
+
+    - name: Check SSH service on internal zone at runtime
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - "--zone={{ internal_zone }}"
+          - --query-service=ssh
+      register: internal_ssh_runtime_check
+      changed_when: false
+      failed_when: internal_ssh_runtime_check.rc not in [0, 1]
+
+    - name: Allow SSH service on internal zone at runtime
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - "--zone={{ internal_zone }}"
+          - --add-service=ssh
+      when: internal_ssh_runtime_check.rc == 1
+
+
+    # ========================================================
+    # 3-2. SSH 연결 보호 - Permanent
+    #
+    # reload/reboot 후에도 SSH 유지
+    # ========================================================
+
+    - name: Check SSH service on external zone permanently
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - --query-service=ssh
+      register: external_ssh_permanent_check
+      changed_when: false
+      failed_when: external_ssh_permanent_check.rc not in [0, 1]
+
+    - name: Allow SSH service on external zone permanently
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - --add-service=ssh
+      when: external_ssh_permanent_check.rc == 1
+      notify: Reload firewalld
+
+    - name: Check SSH service on internal zone permanently
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ internal_zone }}"
+          - --query-service=ssh
+      register: internal_ssh_permanent_check
+      changed_when: false
+      failed_when: internal_ssh_permanent_check.rc not in [0, 1]
+
+    - name: Allow SSH service on internal zone permanently
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ internal_zone }}"
+          - --add-service=ssh
+      when: internal_ssh_permanent_check.rc == 1
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-3. NIC -> Zone 설정
+    #
+    # 외부 NIC -> external
+    # 내부 NIC -> internal
+    # ========================================================
+
+    - name: Read the zone assigned to each interface
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--get-zone-of-interface={{ item.interface }}"
+      loop: "{{ firewalld_interfaces }}"
+      loop_control:
+        label: "{{ item.interface }}"
+      register: interface_zone_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Assign interfaces to their zones
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ item.item.zone }}"
+          - "--change-interface={{ item.item.interface }}"
+      loop: "{{ interface_zone_checks.results }}"
+      loop_control:
+        label: "{{ item.item.interface }} -> {{ item.item.zone }}"
+      when: item.rc != 0 or (item.stdout | trim) != item.item.zone
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-4. Policy 생성
+    # ========================================================
+
+    - name: Read existing policies
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - --get-policies
+      register: existing_policies
+      changed_when: false
+
+    - name: Create missing policies
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--new-policy={{ item.name }}"
+      loop: "{{ firewalld_policies }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name not in existing_policies.stdout.split()
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-5. Policy Ingress Zone 설정
+    # ========================================================
+
+    - name: Check policy ingress zones
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--policy={{ item.name }}"
+          - "--query-ingress-zone={{ item.ingress_zone }}"
+      loop: "{{ firewalld_policies }}"
+      loop_control:
+        label: "{{ item.name }}: {{ item.ingress_zone }}"
+      register: policy_ingress_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Add missing policy ingress zones
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--policy={{ item.item.name }}"
+          - "--add-ingress-zone={{ item.item.ingress_zone }}"
+      loop: "{{ policy_ingress_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}: {{ item.item.ingress_zone }}"
+      when: item.rc != 0
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-6. Policy Egress Zone 설정
+    # ========================================================
+
+    - name: Check policy egress zones
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--policy={{ item.name }}"
+          - "--query-egress-zone={{ item.egress_zone }}"
+      loop: "{{ firewalld_policies }}"
+      loop_control:
+        label: "{{ item.name }}: {{ item.egress_zone }}"
+      register: policy_egress_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Add missing policy egress zones
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--policy={{ item.item.name }}"
+          - "--add-egress-zone={{ item.item.egress_zone }}"
+      loop: "{{ policy_egress_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}: {{ item.item.egress_zone }}"
+      when: item.rc != 0
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-7. Policy Target = ACCEPT
+    # ========================================================
+
+    - name: Read policy targets
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--policy={{ item.name }}"
+          - --get-target
+      loop: "{{ firewalld_policies }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: policy_target_checks
+      changed_when: false
+
+    - name: Set policy targets
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--policy={{ item.item.name }}"
+          - "--set-target={{ item.item.target }}"
+      loop: "{{ policy_target_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}: {{ item.item.target }}"
+      when: (item.stdout | trim) != item.item.target
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-8. 기존 전체 Masquerade 제거
+    # ========================================================
+
+    - name: Check full external masquerade
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - --query-masquerade
+      register: full_masquerade_check
+      changed_when: false
+      failed_when: full_masquerade_check.rc not in [0, 1]
+
+    - name: Remove full external masquerade
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - --remove-masquerade
+      when: full_masquerade_check.rc == 0
+      notify: Reload firewalld
+
+
+    # ========================================================
+    # 3-9. 선택적 Masquerade 설정
+    #
+    # 192.168.0.0/16 목적지 -> NAT 하지 않음
+    # 나머지 목적지         -> Masquerade
+    # ========================================================
+
+    - name: Check selective masquerade rule
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - "--query-rich-rule={{ selective_masquerade_rule }}"
+      register: selective_masquerade_check
+      changed_when: false
+      failed_when: selective_masquerade_check.rc not in [0, 1]
+
+    - name: Add selective masquerade rule
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - "--add-rich-rule={{ selective_masquerade_rule }}"
+      when: selective_masquerade_check.rc == 1
+      notify: Reload firewalld

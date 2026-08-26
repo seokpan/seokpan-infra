@@ -1,0 +1,87 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Kubernetes node prerequisites and package installation
+
+# Swap
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+  changed_when: true
+
+- name: Disable swap permanently
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1'
+
+# Kernel modules
+- name: Configure Kubernetes kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      overlay
+      br_netfilter
+
+- name: Check overlay module
+  ansible.builtin.shell: lsmod | grep -q '^overlay'
+  register: overlay_loaded
+  changed_when: false
+  failed_when: false
+
+- name: Load overlay module
+  ansible.builtin.command: modprobe overlay
+  when: overlay_loaded.rc != 0
+  changed_when: true
+
+- name: Check br_netfilter module
+  ansible.builtin.shell: lsmod | grep -q '^br_netfilter'
+  register: br_netfilter_loaded
+  changed_when: false
+  failed_when: false
+
+- name: Load br_netfilter module
+  ansible.builtin.command: modprobe br_netfilter
+  when: br_netfilter_loaded.rc != 0
+  changed_when: true
+
+# sysctl
+- name: Configure Kubernetes sysctl parameters
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-kubernetes.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+  notify: Reload sysctl
+
+# Repository
+- name: Configure Kubernetes repository
+  ansible.builtin.template:
+    src: kubernetes.repo.j2
+    dest: /etc/yum.repos.d/kubernetes.repo
+    owner: root
+    group: root
+    mode: "0644"
+
+# Kubernetes packages
+- name: Install pinned Kubernetes packages
+  ansible.builtin.dnf:
+    name:
+      - "kubelet-{{ kubernetes_version }}"
+      - "kubeadm-{{ kubernetes_version }}"
+      - "kubectl-{{ kubernetes_version }}"
+    state: present
+    disable_excludes: kubernetes
+
+- name: Enable kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true

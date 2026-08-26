@@ -1,0 +1,285 @@
+---
+# ============================================================
+# 1. 필수 변수 검증
+# ============================================================
+
+- name: Verify LB network variables
+  ansible.builtin.assert:
+    that:
+      - lb_management_ip is defined
+      - lb_vip is defined
+      - lb_vip_prefix is defined
+      - lb_static_routes is defined
+      - lb_static_routes | length > 0
+    fail_msg: >-
+      Required LB network variables are missing
+      for {{ inventory_hostname }}.
+
+
+# ============================================================
+# 2. 네트워크 Facts 수집
+# ============================================================
+
+- name: Gather network facts
+  ansible.builtin.setup:
+    gather_subset:
+      - network
+
+
+# ============================================================
+# 3. 관리 IP를 가진 NIC 자동 탐지
+# ============================================================
+
+- name: Find LB external interface candidates
+  ansible.builtin.set_fact:
+    lb_external_interface_candidates: >-
+      {{
+        ansible_facts
+        | dict2items
+        | selectattr('value', 'mapping')
+        | selectattr('value.ipv4', 'defined')
+        | selectattr(
+            'value.ipv4.address',
+            'equalto',
+            lb_management_ip
+          )
+        | map(attribute='value.device')
+        | list
+      }}
+
+
+- name: Verify LB external interface detection
+  ansible.builtin.assert:
+    that:
+      - lb_external_interface_candidates | length == 1
+    fail_msg: >-
+      Failed to detect LB external NIC.
+      management_ip={{ lb_management_ip }}
+      candidates={{ lb_external_interface_candidates }}
+
+
+- name: Set LB external interface
+  ansible.builtin.set_fact:
+    lb_external_interface: "{{ lb_external_interface_candidates[0] }}"
+
+
+# ============================================================
+# 4. NetworkManager Connection 자동 탐지
+# ============================================================
+
+- name: Detect LB NetworkManager connection
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - GENERAL.CONNECTION
+      - device
+      - show
+      - "{{ lb_external_interface }}"
+  register: lb_connection_result
+  changed_when: false
+
+
+- name: Verify LB NetworkManager connection
+  ansible.builtin.assert:
+    that:
+      - lb_connection_result.rc == 0
+      - lb_connection_result.stdout | trim | length > 0
+      - lb_connection_result.stdout | trim != "--"
+    fail_msg: >-
+      Failed to detect NetworkManager connection
+      for {{ lb_external_interface }}.
+
+
+- name: Set LB NetworkManager connection
+  ansible.builtin.set_fact:
+    lb_connection_name: "{{ lb_connection_result.stdout | trim }}"
+
+
+- name: Show detected LB network information
+  ansible.builtin.debug:
+    msg:
+      - "Management IP: {{ lb_management_ip }}"
+      - "External NIC: {{ lb_external_interface }}"
+      - "NetworkManager Connection: {{ lb_connection_name }}"
+
+
+# ============================================================
+# 5. Runtime Static Route 확인
+# ============================================================
+
+- name: Read current runtime static routes
+  ansible.builtin.command:
+    argv:
+      - ip
+      - route
+      - show
+      - "{{ item.network }}"
+  loop: "{{ lb_static_routes }}"
+  loop_control:
+    label: "{{ item.network }}"
+  register: current_runtime_routes
+  changed_when: false
+  failed_when: false
+
+
+# ============================================================
+# 6. Runtime Static Route 설정
+# ============================================================
+
+- name: Configure runtime static routes
+  ansible.builtin.command:
+    argv:
+      - ip
+      - route
+      - replace
+      - "{{ item.item.network }}"
+      - via
+      - "{{ item.item.gateway }}"
+      - dev
+      - "{{ lb_external_interface }}"
+  loop: "{{ current_runtime_routes.results }}"
+  loop_control:
+    label: "{{ item.item.network }} via {{ item.item.gateway }}"
+  when: >
+    item.item.network not in item.stdout
+    or ('via ' ~ item.item.gateway) not in item.stdout
+    or ('dev ' ~ lb_external_interface) not in item.stdout
+
+
+# ============================================================
+# 7. Persistent Static Route 확인
+# ============================================================
+
+- name: Read current persistent static routes
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.routes
+      - connection
+      - show
+      - "{{ lb_connection_name }}"
+  register: current_persistent_routes
+  changed_when: false
+
+
+# ============================================================
+# 8. Persistent Static Route 추가
+# ============================================================
+
+- name: Add missing persistent static routes
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ lb_connection_name }}"
+      - +ipv4.routes
+      - "{{ item.network }} {{ item.gateway }}"
+  loop: "{{ lb_static_routes }}"
+  loop_control:
+    label: "{{ item.network }} via {{ item.gateway }}"
+  when: item.network not in current_persistent_routes.stdout
+
+
+# ============================================================
+# 9. Runtime VIP 확인
+# ============================================================
+
+- name: Read current runtime addresses
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -4
+      - addr
+      - show
+      - dev
+      - "{{ lb_external_interface }}"
+  register: current_runtime_addresses
+  changed_when: false
+
+
+# ============================================================
+# 10. Runtime VIP 설정
+# ============================================================
+
+- name: Configure Kubernetes API VIP at runtime
+  ansible.builtin.command:
+    argv:
+      - ip
+      - address
+      - add
+      - "{{ lb_vip }}/{{ lb_vip_prefix }}"
+      - dev
+      - "{{ lb_external_interface }}"
+  when: lb_vip not in current_runtime_addresses.stdout
+
+
+# ============================================================
+# 11. Persistent IP 목록 확인
+# ============================================================
+
+- name: Read persistent IPv4 addresses
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.addresses
+      - connection
+      - show
+      - "{{ lb_connection_name }}"
+  register: current_persistent_addresses
+  changed_when: false
+
+
+# ============================================================
+# 12. VIP Persistent 설정
+# ============================================================
+
+- name: Configure VIP persistently
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ lb_connection_name }}"
+      - +ipv4.addresses
+      - "{{ lb_vip }}/{{ lb_vip_prefix }}"
+  when: lb_vip not in current_persistent_addresses.stdout
+
+
+# ============================================================
+# 13. 최종 Kernel Route 확인
+# ============================================================
+
+- name: Read final kernel routing table
+  ansible.builtin.command:
+    cmd: ip route
+  register: final_ip_routes
+  changed_when: false
+
+
+- name: Display final kernel routing table
+  ansible.builtin.debug:
+    var: final_ip_routes.stdout_lines
+
+
+# ============================================================
+# 14. 최종 VIP 확인
+# ============================================================
+
+- name: Read final LB addresses
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -br
+      - -4
+      - addr
+  register: final_lb_addresses
+  changed_when: false
+
+
+- name: Display final LB addresses
+  ansible.builtin.debug:
+    var: final_lb_addresses.stdout_lines

@@ -1,0 +1,11 @@
+---
+static_routes:
+  - network: 192.168.52.0/24
+    gateway: 10.1.93.73
+
+  - network: 192.168.53.0/24
+    gateway: 10.1.93.75
+
+  - network: 192.168.54.0/24
+    gateway: 10.1.93.77
+    

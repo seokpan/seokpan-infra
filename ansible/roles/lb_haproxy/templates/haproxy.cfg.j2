@@ -1,0 +1,102 @@
+global
+    log         127.0.0.1 local2
+    chroot      /var/lib/haproxy
+    pidfile     /run/haproxy.pid
+    maxconn     {{ haproxy_maxconn }}
+    user        haproxy
+    group       haproxy
+    daemon
+
+defaults
+    mode                    {{ haproxy_mode }}
+    log                     global
+    option                  tcplog
+    option                  dontlognull
+    retries                 3
+    timeout connect         {{ haproxy_timeout_connect }}
+    timeout client          {{ haproxy_timeout_client }}
+    timeout server          {{ haproxy_timeout_server }}
+
+
+# ============================================================
+# HTTP
+# 10.1.93.90:80
+# -> Worker NodePort 30080
+# ============================================================
+
+frontend service_http
+    bind {{ haproxy_bind_address }}:80
+    mode tcp
+    default_backend gateway_http
+
+backend gateway_http
+    mode tcp
+    balance {{ haproxy_balance_algorithm }}
+    option tcp-check
+
+{% for worker in haproxy_workers %}
+    server {{ worker.name }} {{ worker.address }}:{{ haproxy_http_nodeport }} check
+{% endfor %}
+
+
+# ============================================================
+# HTTPS / WSS
+# 10.1.93.90:443
+# -> Worker NodePort 30443
+# ============================================================
+
+frontend service_https
+    bind {{ haproxy_bind_address }}:443
+    mode tcp
+    default_backend gateway_https
+
+backend gateway_https
+    mode tcp
+    balance {{ haproxy_balance_algorithm }}
+    option tcp-check
+
+{% for worker in haproxy_workers %}
+    server {{ worker.name }} {{ worker.address }}:{{ haproxy_https_nodeport }} check
+{% endfor %}
+
+
+# ============================================================
+# Kubernetes API
+# 10.1.93.90:6443
+# -> cp-01 / cp-02 / cp-03
+# ============================================================
+
+frontend kubernetes_api
+    bind {{ haproxy_bind_address }}:6443
+    mode tcp
+    default_backend kubernetes_control_plane
+
+backend kubernetes_control_plane
+    mode tcp
+    balance {{ haproxy_balance_algorithm }}
+    option tcp-check
+
+{% for cp in haproxy_control_planes %}
+    server {{ cp.name }} {{ cp.address }}:{{ cp.port }} check
+{% endfor %}
+
+
+# ============================================================
+# MariaDB / MaxScale
+# 10.1.93.90:3306
+# -> MaxScale
+# ============================================================
+
+frontend database
+    bind {{ haproxy_bind_address }}:3306
+    mode tcp
+    default_backend maxscale
+
+backend maxscale
+    mode tcp
+    balance {{ haproxy_balance_algorithm }}
+    option tcp-check
+
+{% for server in haproxy_maxscale %}
+    server {{ server.name }} {{ server.address }}:{{ server.port }} check
+{% endfor %}

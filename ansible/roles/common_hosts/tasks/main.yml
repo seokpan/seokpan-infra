@@ -1,0 +1,35 @@
+---
+# ============================================================
+# /etc/hosts에 프로젝트용 고정 Alias 등록
+# ============================================================
+
+- name: Configure project host aliases
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED PROJECT HOST ALIASES"
+    block: |
+      {% for host in common_host_entries %}
+      {{ host.ip }} {{ host.alias }}
+      {% endfor %}
+    state: present
+    create: true
+
+
+# ============================================================
+# 적용된 /etc/hosts 확인
+# ============================================================
+
+- name: Read project host aliases
+  ansible.builtin.command:
+    cmd: cat /etc/hosts
+  register: common_hosts_result
+  changed_when: false
+
+
+# ============================================================
+# 결과 출력
+# ============================================================
+
+- name: Display project host aliases
+  ansible.builtin.debug:
+    var: common_hosts_result.stdout_lines

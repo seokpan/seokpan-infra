@@ -1,0 +1,11 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Prepare Kubernetes nodes and install Kubernetes packages
+
+- name: Configure Kubernetes prerequisites
+  hosts: control_planes:workers
+  gather_facts: true
+  roles:
+    - kubernetes_prereq

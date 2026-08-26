@@ -1,0 +1,7 @@
+[kubernetes]
+name=Kubernetes
+baseurl={{ kubernetes_repo_baseurl }}
+enabled=1
+gpgcheck=1
+gpgkey={{ kubernetes_repo_gpgkey }}
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni

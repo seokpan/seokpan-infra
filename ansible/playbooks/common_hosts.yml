@@ -1,0 +1,7 @@
+---
+- name: Configure common host aliases
+  hosts: all
+  become: true
+
+  roles:
+    - common_hosts

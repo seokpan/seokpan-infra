@@ -1,0 +1,79 @@
+---
+# ============================================================
+# HAProxy 기본 설정
+# ============================================================
+
+haproxy_package: haproxy
+haproxy_service: haproxy
+haproxy_config_path: /etc/haproxy/haproxy.cfg
+
+haproxy_bind_address: "10.1.93.90"
+
+haproxy_mode: tcp
+haproxy_balance_algorithm: roundrobin
+
+haproxy_timeout_connect: 5s
+haproxy_timeout_client: 60s
+haproxy_timeout_server: 60s
+
+haproxy_maxconn: 4000
+
+
+# ============================================================
+# HAProxy에서 열 포트
+# ============================================================
+
+haproxy_firewall_ports:
+  - 80
+  - 443
+  - 6443
+  - 3306
+
+
+# ============================================================
+# HTTP / HTTPS Worker NodePort
+# ============================================================
+
+haproxy_http_nodeport: 30080
+haproxy_https_nodeport: 30443
+
+
+# ============================================================
+# Kubernetes Worker Backend
+# ============================================================
+
+haproxy_workers:
+  - name: worker-01
+    address: 192.168.51.30
+
+  - name: worker-02
+    address: 192.168.52.30
+
+
+# ============================================================
+# Kubernetes Control Plane Backend
+# ============================================================
+
+haproxy_control_planes:
+  - name: cp-01
+    address: 192.168.51.20
+    port: 6443
+
+  - name: cp-02
+    address: 192.168.52.20
+    port: 6443
+
+  - name: cp-03
+    address: 192.168.53.20
+    port: 6443
+
+
+# ============================================================
+# MaxScale Backend
+# ============================================================
+
+haproxy_maxscale:
+  - name: maxscale-01
+    address: 192.168.53.40
+    port: 3306
+  

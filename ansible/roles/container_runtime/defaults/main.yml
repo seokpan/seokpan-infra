@@ -1,0 +1,13 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: container_runtime default variables
+
+containerd_package: "containerd.io"
+containerd_version: "2.3.3-1.el9"
+
+docker_repo_url: "https://download.docker.com/linux/centos/docker-ce.repo"
+
+containerd_config_dir: "/etc/containerd"
+containerd_config_file: "/etc/containerd/config.toml"

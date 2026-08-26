@@ -1,0 +1,7 @@
+---
+- name: Configure Type A firewalld on all VRouter VMs
+  hosts: vrouters
+  become: true
+
+  roles:
+    - vrouter_firewall
