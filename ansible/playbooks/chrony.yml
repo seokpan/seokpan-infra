@@ -1,0 +1,7 @@
+---
+- name: Check and remediate Chrony NTP synchronization
+  hosts: all:!harbor
+  gather_facts: false
+
+  roles:
+    - chrony

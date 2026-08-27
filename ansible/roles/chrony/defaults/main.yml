@@ -1,0 +1,20 @@
+---
+# ============================================================
+# Chrony default variables
+# ============================================================
+
+# 현재 NTP 동기화가 비정상인 서버를 복구할 때만
+# 아래 외부 NTP 서버를 사용한다.
+#
+# 이미 정상적으로 동기화 중인 서버의 기존 NTP 설정은
+# 변경하지 않는다.
+
+chrony_external_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+  - 2.pool.ntp.org
+  - 3.pool.ntp.org
+
+# 부팅 초기 시간 차이가 큰 경우 빠르게 보정한다.
+chrony_makestep_threshold: 1.0
+chrony_makestep_updates: 3

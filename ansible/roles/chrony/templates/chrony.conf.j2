@@ -1,0 +1,22 @@
+# Ansible managed
+# Applied only when Chrony/NTP remediation is required.
+
+{% for server in chrony_external_servers %}
+server {{ server }} iburst
+{% endfor %}
+
+driftfile /var/lib/chrony/drift
+
+makestep {{ chrony_makestep_threshold }} {{ chrony_makestep_updates }}
+
+rtcsync
+
+keyfile /etc/chrony.keys
+
+leapsectz right/UTC
+
+logdir /var/log/chrony
+
+# Disable remote chronyc UDP command port.
+# Local chronyc commands continue to work through the Unix socket.
+cmdport 0

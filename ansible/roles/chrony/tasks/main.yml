@@ -1,0 +1,299 @@
+---
+# ============================================================
+# Chrony / NTP Conditional Remediation
+#
+# 목적:
+# 1. 현재 Chrony/NTP 상태를 먼저 확인한다.
+# 2. 정상 서버는 변경하지 않는다.
+# 3. 비정상 서버만 외부 NTP 기준으로 복구한다.
+# 4. 복구 후 다시 상태를 검증한다.
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 1. Chrony 패키지 설치 여부 확인
+# ------------------------------------------------------------
+- name: Check chrony package
+  ansible.builtin.command:
+    argv:
+      - rpm
+      - -q
+      - chrony
+  register: chrony_package_check
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 2. chronyd 서비스 실행 상태 확인
+# ------------------------------------------------------------
+- name: Check chronyd active state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - chronyd
+  register: chronyd_active_check
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 3. chronyd 부팅 자동 시작 여부 확인
+# ------------------------------------------------------------
+- name: Check chronyd enabled state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-enabled
+      - chronyd
+  register: chronyd_enabled_check
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 4. systemd 기준 NTP 동기화 상태 확인
+# ------------------------------------------------------------
+- name: Check system NTP synchronization
+  ansible.builtin.command:
+    argv:
+      - timedatectl
+      - show
+      - --property=NTPSynchronized
+      - --value
+  register: ntp_synchronized_check
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 5. Chrony tracking 상태 확인
+#
+# Chrony가 설치되지 않았거나 서비스가 정상적이지 않아도
+# Playbook 전체가 여기서 중단되지 않도록 한다.
+# ------------------------------------------------------------
+- name: Check chronyc tracking
+  ansible.builtin.command:
+    argv:
+      - chronyc
+      - tracking
+  register: chronyc_tracking_check
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 6. 현재 선택된 NTP Source 확인
+# ------------------------------------------------------------
+- name: Check selected NTP source
+  ansible.builtin.command:
+    argv:
+      - chronyc
+      - sources
+  register: chronyc_sources_check
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 7. 개별 상태를 Boolean 값으로 정리
+#
+# True  = 정상
+# False = 비정상
+# ------------------------------------------------------------
+- name: Determine individual Chrony health checks
+  ansible.builtin.set_fact:
+    chrony_package_ok: "{{ chrony_package_check.rc == 0 }}"
+    chrony_active_ok: "{{ (chronyd_active_check.stdout | default('') | trim) == 'active' }}"
+    chrony_enabled_ok: "{{ (chronyd_enabled_check.stdout | default('') | trim) == 'enabled' }}"
+    chrony_ntp_sync_ok: "{{ (ntp_synchronized_check.stdout | default('') | trim) == 'yes' }}"
+    chrony_leap_ok: "{{ 'Leap status     : Normal' in (chronyc_tracking_check.stdout | default('')) }}"
+    chrony_source_ok: "{{ '^*' in (chronyc_sources_check.stdout | default('')) }}"
+
+
+# ------------------------------------------------------------
+# 8. 최종 정상 여부 판단
+#
+# 아래 여섯 조건을 모두 만족해야 정상으로 처리한다.
+# ------------------------------------------------------------
+- name: Determine final Chrony health
+  ansible.builtin.set_fact:
+    chrony_is_healthy: >-
+      {{
+        chrony_package_ok
+        and chrony_active_ok
+        and chrony_enabled_ok
+        and chrony_ntp_sync_ok
+        and chrony_leap_ok
+        and chrony_source_ok
+      }}
+
+
+# ------------------------------------------------------------
+# 9. 현재 판단 근거 출력
+#
+# 비전공자도 어떤 항목 때문에 정상/비정상으로
+# 판정됐는지 확인할 수 있도록 출력한다.
+# ------------------------------------------------------------
+- name: Display Chrony health check details
+  ansible.builtin.debug:
+    msg:
+      - "=================================================="
+      - "HOST: {{ inventory_hostname }}"
+      - "PACKAGE_OK: {{ chrony_package_ok }}"
+      - "ACTIVE_OK: {{ chrony_active_ok }}"
+      - "ENABLED_OK: {{ chrony_enabled_ok }}"
+      - "NTP_SYNC_OK: {{ chrony_ntp_sync_ok }}"
+      - "LEAP_OK: {{ chrony_leap_ok }}"
+      - "SOURCE_OK: {{ chrony_source_ok }}"
+      - "FINAL_HEALTHY: {{ chrony_is_healthy }}"
+      - "=================================================="
+
+
+# ------------------------------------------------------------
+# 10. 정상/비정상 최종 결과 출력
+# ------------------------------------------------------------
+- name: Display Chrony health result
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      {{
+        'PASS - Chrony/NTP is already healthy. No changes required.'
+        if chrony_is_healthy
+        else
+        'REMEDIATION REQUIRED - Chrony/NTP is not healthy.'
+      }}
+
+
+# ============================================================
+# 11. 비정상 서버만 복구
+#
+# 정상 서버에서는 이 Block 전체가 SKIP 된다.
+#
+# 시스템 패키지, /etc/chrony.conf, systemd 서비스를
+# 변경하므로 root 권한이 필요한 부분에만 become을 사용한다.
+# ============================================================
+- name: Remediate unhealthy Chrony configuration
+  when: not chrony_is_healthy
+  become: true
+
+  block:
+
+    # --------------------------------------------------------
+    # 11-1. Chrony 설치
+    # --------------------------------------------------------
+    - name: Ensure chrony package is installed
+      ansible.builtin.package:
+        name: chrony
+        state: present
+
+
+    # --------------------------------------------------------
+    # 11-2. 복구용 외부 NTP 설정 배포
+    #
+    # 기존 파일이 실제로 변경되는 경우에만
+    # Handler가 chronyd를 재시작한다.
+    # --------------------------------------------------------
+    - name: Configure external NTP servers
+      ansible.builtin.template:
+        src: chrony.conf.j2
+        dest: /etc/chrony.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      notify: Restart chronyd
+
+
+    # --------------------------------------------------------
+    # 11-3. chronyd 활성화 및 실행
+    # --------------------------------------------------------
+    - name: Ensure chronyd is enabled and running
+      ansible.builtin.service:
+        name: chronyd
+        enabled: true
+        state: started
+
+
+# ------------------------------------------------------------
+# 12. 설정 변경 시 발생한 Handler를 지금 실행
+#
+# 정상 서버에서는 pending Handler가 없으므로
+# chronyd가 재시작되지 않는다.
+# ------------------------------------------------------------
+- name: Apply pending Chrony handlers
+  ansible.builtin.meta: flush_handlers
+
+
+# ------------------------------------------------------------
+# 13. 최종 chronyd 실행 상태 확인
+# ------------------------------------------------------------
+- name: Verify final chronyd active state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - chronyd
+  register: chronyd_final_active
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 14. 최종 NTP 동기화 상태 확인
+# ------------------------------------------------------------
+- name: Verify final NTP synchronization
+  ansible.builtin.command:
+    argv:
+      - timedatectl
+      - show
+      - --property=NTPSynchronized
+      - --value
+  register: chrony_final_ntp_sync
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 15. 최종 Chrony Tracking 확인
+# ------------------------------------------------------------
+- name: Verify Chrony tracking
+  ansible.builtin.command:
+    argv:
+      - chronyc
+      - tracking
+  register: chrony_final_tracking
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 16. 최종 NTP Source 확인
+# ------------------------------------------------------------
+- name: Verify Chrony sources
+  ansible.builtin.command:
+    argv:
+      - chronyc
+      - sources
+  register: chrony_final_sources
+  changed_when: false
+  failed_when: false
+
+
+# ------------------------------------------------------------
+# 17. 최종 검증 결과 출력
+# ------------------------------------------------------------
+- name: Display final Chrony status
+  ansible.builtin.debug:
+    msg:
+      - "=================================================="
+      - "HOST: {{ inventory_hostname }}"
+      - "INITIAL STATUS: {{ 'HEALTHY' if chrony_is_healthy else 'REMEDIATION ATTEMPTED' }}"
+      - "CHRONYD ACTIVE: {{ chronyd_final_active.stdout | default('UNKNOWN') }}"
+      - "NTP SYNCHRONIZED: {{ chrony_final_ntp_sync.stdout | default('UNKNOWN') }}"
+      - "TRACKING:"
+      - "{{ chrony_final_tracking.stdout_lines | default([]) }}"
+      - "SOURCES:"
+      - "{{ chrony_final_sources.stdout_lines | default([]) }}"
+      - "=================================================="
