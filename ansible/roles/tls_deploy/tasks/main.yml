@@ -1,0 +1,189 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/tls_deploy/tasks/main.yml
+#
+# 대상 호스트(harbor-01, lb-01 등)에서 실행되지만, 실제 서명 작업은
+# delegate_to로 Ansible Controller에 위임한다. 개인키는 Controller에서
+# 만든 뒤 fetch/copy 방식이 아니라 controller -> target 로 직접 전달한다
+# (target -> controller 로 개인키가 거슬러 올라가는 경로를 만들지 않기 위함).
+
+
+# ============================================================
+# 1. 필수 변수 확인
+# ============================================================
+
+- name: Verify TLS service variables
+  ansible.builtin.assert:
+    that:
+      - tls_service_fqdn is defined
+      - tls_service_san is defined
+      - tls_service_cert_path is defined
+      - tls_service_key_path is defined
+    fail_msg: >-
+      tls_service_fqdn / tls_service_san / tls_service_cert_path / tls_service_key_path
+      가 {{ inventory_hostname }} 의 host_vars에 정의되어 있지 않습니다.
+
+
+# ============================================================
+# 2. Root CA 존재 확인 (Controller 기준)
+# ============================================================
+
+- name: Check Root CA exists on controller
+  ansible.builtin.stat:
+    path: "{{ internal_ca_cert_path }}"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  register: tls_root_ca_check
+
+- name: Fail early if Root CA not yet generated
+  ansible.builtin.assert:
+    that:
+      - tls_root_ca_check.stat.exists
+    fail_msg: >-
+      Root CA가 아직 없습니다. internal_ca role(playbooks/internal_ca.yml)을
+      먼저 실행하세요.
+
+
+# ============================================================
+# 3. 이미 배포된 인증서가 있는지 확인 (멱등성)
+# ============================================================
+
+- name: Check existing certificate on target host
+  ansible.builtin.stat:
+    path: "{{ tls_service_cert_path }}"
+  register: tls_existing_cert
+
+- name: Check existing certificate SAN matches (skip reissue if valid)
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ tls_service_cert_path }} -noout -checkend 2592000
+  register: tls_existing_cert_valid
+  changed_when: false
+  failed_when: false
+  when: tls_existing_cert.stat.exists
+
+# checkend 2592000 = 30일 이내 만료 예정이면 rc != 0 -> 재발급 대상
+- name: Set reissue-needed fact
+  ansible.builtin.set_fact:
+    tls_needs_issue: "{{ not tls_existing_cert.stat.exists or (tls_existing_cert_valid.rc | default(1)) != 0 }}"
+
+
+# ============================================================
+# 4. Controller에서 서비스 개인키 + CSR 생성
+# ============================================================
+
+- name: Ensure work directory exists on controller
+  ansible.builtin.file:
+    path: "{{ tls_work_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  when: tls_needs_issue
+
+- name: Generate service private key on controller
+  ansible.builtin.command:
+    cmd: openssl genrsa -out {{ tls_work_dir }}/{{ tls_service_fqdn }}.key {{ tls_service_key_bits }}
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  when: tls_needs_issue
+
+- name: Generate CSR on controller
+  ansible.builtin.command:
+    cmd: >
+      openssl req -new
+      -key {{ tls_work_dir }}/{{ tls_service_fqdn }}.key
+      -out {{ tls_work_dir }}/{{ tls_service_fqdn }}.csr
+      -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ tls_service_fqdn }}"
+      -addext "subjectAltName={{ tls_service_san }}"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  when: tls_needs_issue
+
+- name: Write SAN extension file (for x509 signing step)
+  ansible.builtin.copy:
+    dest: "{{ tls_work_dir }}/{{ tls_service_fqdn }}.ext"
+    content: "subjectAltName={{ tls_service_san }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  when: tls_needs_issue
+
+
+# ============================================================
+# 5. Root CA로 서명 (Controller 로컬에서만 수행)
+# ============================================================
+
+- name: Sign service certificate with Root CA
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -req
+      -in {{ tls_work_dir }}/{{ tls_service_fqdn }}.csr
+      -CA {{ internal_ca_cert_path }}
+      -CAkey {{ internal_ca_key_path }}
+      -CAserial {{ internal_ca_dir }}/ca.srl
+      -out {{ tls_work_dir }}/{{ tls_service_fqdn }}.crt
+      -days {{ tls_service_days }}
+      -sha256
+      -extfile {{ tls_work_dir }}/{{ tls_service_fqdn }}.ext
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  when: tls_needs_issue
+
+
+# ============================================================
+# 6. 대상 호스트에 인증서/키 배포
+# ============================================================
+
+- name: Ensure target certificate directory exists
+  ansible.builtin.file:
+    path: "{{ tls_service_cert_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Read signed certificate from controller
+  ansible.builtin.slurp:
+    src: "{{ tls_work_dir }}/{{ tls_service_fqdn }}.crt"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  register: tls_cert_content
+  when: tls_needs_issue
+
+- name: Read private key from controller
+  ansible.builtin.slurp:
+    src: "{{ tls_work_dir }}/{{ tls_service_fqdn }}.key"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  register: tls_key_content
+  when: tls_needs_issue
+
+- name: Deploy certificate to target host
+  ansible.builtin.copy:
+    content: "{{ tls_cert_content.content | b64decode }}"
+    dest: "{{ tls_service_cert_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: tls_needs_issue
+  no_log: true
+
+- name: Deploy private key to target host
+  ansible.builtin.copy:
+    content: "{{ tls_key_content.content | b64decode }}"
+    dest: "{{ tls_service_key_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: tls_needs_issue
+  no_log: true
+
+
+# ============================================================
+# 7. 최종 상태 출력
+# ============================================================
+
+- name: Display TLS deployment summary
+  ansible.builtin.debug:
+    msg:
+      - "FQDN = {{ tls_service_fqdn }}"
+      - "Cert = {{ tls_service_cert_path }}"
+      - "재발급 여부 = {{ tls_needs_issue }}"

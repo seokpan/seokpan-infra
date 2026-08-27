@@ -1,0 +1,73 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/ca_trust/tasks/main.yml
+#
+# Worker 노드(containerd), Jenkins Agent 등이 harbor.stone.test를
+# 신뢰하려면 Root CA 공개 인증서가 시스템 CA 번들에 포함되어야 한다.
+# containerd는 기본적으로 Go의 시스템 인증서 풀(update-ca-trust 결과물)을 사용하므로
+# 별도 containerd 설정(certs.d) 없이 이 단계만으로 image pull이 신뢰된다.
+
+
+# ============================================================
+# 1. Root CA 인증서 읽기 (Controller 기준)
+# ============================================================
+
+- name: Check Root CA exists on controller
+  ansible.builtin.stat:
+    path: "{{ internal_ca_cert_path }}"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  register: ca_trust_root_check
+
+- name: Fail if Root CA missing
+  ansible.builtin.assert:
+    that:
+      - ca_trust_root_check.stat.exists
+    fail_msg: "Root CA가 아직 없습니다. internal_ca role을 먼저 실행하세요."
+
+- name: Read Root CA certificate from controller
+  ansible.builtin.slurp:
+    src: "{{ internal_ca_cert_path }}"
+  delegate_to: "{{ groups['ansible_controller'][0] }}"
+  register: ca_trust_cert_content
+
+
+# ============================================================
+# 2. 대상 호스트에 배포
+# ============================================================
+
+- name: Deploy Root CA certificate to trust anchor path
+  ansible.builtin.copy:
+    content: "{{ ca_trust_cert_content.content | b64decode }}"
+    dest: "{{ ca_trust_anchor_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: ca_trust_deploy_result
+
+
+# ============================================================
+# 3. 시스템 신뢰 저장소 갱신
+# ============================================================
+
+- name: Update system CA trust
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+  when: ca_trust_deploy_result.changed
+
+
+# ============================================================
+# 4. 최종 확인
+# ============================================================
+
+- name: Verify CA is now trusted
+  ansible.builtin.command:
+    cmd: openssl verify -CAfile {{ ca_trust_anchor_path }} {{ ca_trust_anchor_path }}
+  register: ca_trust_verify
+  changed_when: false
+  failed_when: false
+
+- name: Display trust status
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} CA trust 상태: {{ ca_trust_verify.stdout }}"

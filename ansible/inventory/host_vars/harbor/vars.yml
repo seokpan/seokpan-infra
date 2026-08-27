@@ -2,17 +2,25 @@
 # 작성자: 최유준
 # 작성 날짜: 2026-08-27
 #
-# inventory/host_vars/harbor.yml
+# inventory/host_vars/harbor/vars.yml
 # harbor-01(192.168.53.61) 고유 값. 공통 기본값은 roles/harbor/defaults/main.yml 참고.
 
-harbor_hostname: harbor.stone.test
+harbor_hostname: harbor.seokpan.soldesk.store
 harbor_https_port: 443
 harbor_http_port: 80
 harbor_data_volume: /data
 
 # internal_ca / tls_deploy role 결과물과 반드시 일치시킬 것
-harbor_cert_path: /data/secret/tls/harbor.stone.test.crt
-harbor_key_path: /data/secret/tls/harbor.stone.test.key
+harbor_cert_path: /data/secret/tls/harbor.seokpan.soldesk.store.crt
+harbor_key_path: /data/secret/tls/harbor.seokpan.soldesk.store.key
+
+# tls_deploy role이 이 값을 보고 harbor.seokpan.soldesk.store 인증서를 발급/배포한다.
+# 위 harbor_cert_path/key_path와 반드시 동일한 값을 가리키도록 유지할 것.
+# 피드백(2026-08-27): SAN에 DNS + Harbor VM IP(192.168.53.61) 둘 다 포함
+tls_service_fqdn: harbor.seokpan.soldesk.store
+tls_service_san: "DNS:harbor.seokpan.soldesk.store,IP:192.168.53.61"
+tls_service_cert_path: "{{ harbor_cert_path }}"
+tls_service_key_path: "{{ harbor_key_path }}"
 
 # 민감정보 - 평문 금지, ansible-vault로 암호화한 별도 파일에서 정의
 # 예: inventory/host_vars/harbor_vault.yml (ansible-vault encrypt)

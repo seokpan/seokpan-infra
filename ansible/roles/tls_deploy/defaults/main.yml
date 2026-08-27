@@ -1,0 +1,28 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/tls_deploy/defaults/main.yml
+#
+# 이 role이 적용되는 각 호스트는 host_vars에서 아래 4개 변수를 반드시 정의해야 한다:
+#   tls_service_fqdn   예: harbor.seokpan.soldesk.store
+#   tls_service_san    예: DNS:harbor.seokpan.soldesk.store,IP:192.168.53.61
+#   tls_service_cert_path  대상 호스트에 배포할 인증서 경로
+#   tls_service_key_path   대상 호스트에 배포할 개인키 경로
+
+# --- Root CA 위치/속성 (internal_ca role의 defaults/main.yml과 반드시 동일한 값 유지) ---
+# tls_deploy는 harbor-01 등 서비스 호스트에서 실행되고 internal_ca role은
+# ansible_controller 호스트에서만 실행되므로, role defaults가 서로 공유되지 않는다.
+# 값이 어긋나면 CA를 못 찾으니 두 role의 defaults를 항상 함께 수정할 것.
+internal_ca_dir: /etc/pki/seokpan-ca
+internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+internal_ca_key_path: "{{ internal_ca_dir }}/ca.key"
+internal_ca_country: "KR"
+internal_ca_organization: "seokpan"
+
+# 서비스 인증서 유효기간 (1년 - Root CA보다 짧게, 주기적 갱신 전제)
+tls_service_days: 365
+tls_service_key_bits: 2048
+
+# Controller 쪽 작업 디렉토리 (호스트별 CSR/서명 결과 임시 보관)
+tls_work_dir: "{{ internal_ca_dir }}/issued/{{ tls_service_fqdn }}"

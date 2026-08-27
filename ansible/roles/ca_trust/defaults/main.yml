@@ -1,0 +1,16 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/ca_trust/defaults/main.yml
+#
+# Root CA "공개 인증서"만 배포한다 (개인키는 여기서 다루지 않음).
+# CentOS/RHEL 계열 update-ca-trust 체계를 사용한다.
+#
+# ca_trust는 Worker 등 대상 호스트에서 실행되고 internal_ca role은
+# ansible_controller에서만 실행되므로, 값을 여기서도 동일하게 정의한다.
+# (internal_ca/defaults/main.yml과 반드시 동일한 값 유지)
+internal_ca_dir: /etc/pki/seokpan-ca
+internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+
+ca_trust_anchor_path: /etc/pki/ca-trust/source/anchors/seokpan-internal-ca.crt

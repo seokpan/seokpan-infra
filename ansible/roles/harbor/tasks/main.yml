@@ -167,6 +167,23 @@
 
 
 # ============================================================
+# 9-1. harbor-01 자체 hostname 해석 보장
+#
+# /etc/hosts 전체 공통 배포는 이유빈님 담당(별도 role)이지만,
+# 이 role의 HTTPS 검증 단계(16번)가 harbor-01 자기 자신에서
+# harbor_hostname을 즉시 풀 수 있어야 하므로 최소한의 자기 항목만
+# 여기서도 보장한다. 이유빈님의 전체 배포와 내용이 같으면 충돌 없이 공존.
+# ============================================================
+
+- name: Ensure harbor-01 can resolve its own hostname
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "{{ ansible_host }} {{ harbor_hostname }}"
+    regexp: "^[0-9.]+\\s+{{ harbor_hostname }}$"
+    state: present
+
+
+# ============================================================
 # 10. 설치 디렉토리 준비
 # ============================================================
 
@@ -333,5 +350,5 @@
       - "Harbor Hostname = {{ harbor_hostname }}"
       - "HTTPS = https://{{ harbor_hostname }}:{{ harbor_https_port }}"
       - "Data Volume = {{ harbor_data_volume }}"
-      - "HTTPS Health Check = {{ harbor_health_check.status }}"
-      - "SAN 포함 여부 = {{ harbor_hostname in harbor_tls_probe.stdout }}"
+      - "HTTPS Health Check = {{ harbor_health_check.status | default('N/A') }}"
+      - "SAN 포함 여부 = {{ harbor_hostname in (harbor_tls_probe.stdout | default('')) }}"

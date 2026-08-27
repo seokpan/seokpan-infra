@@ -1,0 +1,122 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/internal_ca/tasks/main.yml
+#
+# 이 role은 반드시 ansible_controller 그룹(localhost)에서만 실행한다.
+# playbooks/internal_ca.yml 에서 hosts: ansible_controller 로 강제한다.
+
+
+# ============================================================
+# 1. 안전장치 - 다른 호스트에서 실행 방지
+# ============================================================
+
+- name: Verify this role runs only on the Ansible Controller
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in groups['ansible_controller']
+    fail_msg: >-
+      internal_ca role은 Ansible Controller에서만 실행해야 합니다.
+      Root CA 개인키가 다른 호스트에 생성되는 것을 방지하기 위한 안전장치입니다.
+
+
+# ============================================================
+# 2. CA 디렉토리 준비 (root 전용 권한)
+# ============================================================
+
+- name: Ensure CA directory exists with restricted permissions
+  ansible.builtin.file:
+    path: "{{ internal_ca_dir }}"
+    state: directory
+    owner: "{{ internal_ca_owner }}"
+    group: "{{ internal_ca_group }}"
+    mode: "0700"
+
+
+# ============================================================
+# 3. Root CA 이미 존재하는지 확인 (멱등성)
+# ============================================================
+
+- name: Check if Root CA key already exists
+  ansible.builtin.stat:
+    path: "{{ internal_ca_key_path }}"
+  register: internal_ca_key_check
+
+- name: Check if Root CA cert already exists
+  ansible.builtin.stat:
+    path: "{{ internal_ca_cert_path }}"
+  register: internal_ca_cert_check
+
+
+# ============================================================
+# 4. Root CA 개인키 생성 (최초 1회만)
+# ============================================================
+
+- name: Generate Root CA private key
+  ansible.builtin.command:
+    cmd: >
+      openssl genrsa -out {{ internal_ca_key_path }} {{ internal_ca_key_bits }}
+  when: not internal_ca_key_check.stat.exists
+
+- name: Restrict Root CA private key permissions
+  ansible.builtin.file:
+    path: "{{ internal_ca_key_path }}"
+    owner: "{{ internal_ca_owner }}"
+    group: "{{ internal_ca_group }}"
+    mode: "0600"
+
+
+# ============================================================
+# 5. Root CA 자체 서명 인증서 생성 (최초 1회만)
+# ============================================================
+
+- name: Generate self-signed Root CA certificate
+  ansible.builtin.command:
+    cmd: >
+      openssl req -x509 -new -nodes
+      -key {{ internal_ca_key_path }}
+      -sha256 -days {{ internal_ca_days }}
+      -out {{ internal_ca_cert_path }}
+      -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ internal_ca_common_name }}"
+  when: not internal_ca_cert_check.stat.exists
+
+- name: Set Root CA certificate permissions (readable by all - public cert)
+  ansible.builtin.file:
+    path: "{{ internal_ca_cert_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+
+# ============================================================
+# 6. Serial 파일 준비 (서비스 인증서 서명 시 필요, tls_deploy role이 사용)
+# ============================================================
+
+- name: Ensure CA serial file exists
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -serial
+  register: internal_ca_serial_check
+  changed_when: false
+
+- name: Initialize CA serial counter if missing
+  ansible.builtin.copy:
+    dest: "{{ internal_ca_dir }}/ca.srl"
+    content: "01\n"
+    owner: "{{ internal_ca_owner }}"
+    group: "{{ internal_ca_group }}"
+    mode: "0600"
+    force: false
+
+
+# ============================================================
+# 7. 최종 상태 출력
+# ============================================================
+
+- name: Display Root CA summary
+  ansible.builtin.debug:
+    msg:
+      - "Root CA Cert = {{ internal_ca_cert_path }}"
+      - "Root CA Key  = {{ internal_ca_key_path }} (Controller 밖으로 절대 반출 금지)"
+      - "CN = {{ internal_ca_common_name }}"
+      - "유효기간 = {{ internal_ca_days }}일"
