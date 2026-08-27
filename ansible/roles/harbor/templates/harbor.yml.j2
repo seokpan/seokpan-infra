@@ -1,0 +1,79 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# {{ ansible_managed }}
+# harbor.yml - Ansible이 렌더링. 수동 설치 시 편집했던 항목만 변수화.
+
+hostname: {{ harbor_hostname }}
+
+http:
+  port: {{ harbor_http_port }}
+
+https:
+  port: {{ harbor_https_port }}
+  certificate: {{ harbor_cert_path }}
+  private_key: {{ harbor_key_path }}
+
+harbor_admin_password: {{ harbor_admin_password }}
+
+database:
+  password: {{ harbor_db_password }}
+  max_idle_conns: 100
+  max_open_conns: 900
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 0
+
+data_volume: {{ harbor_data_volume }}
+
+trivy:
+  ignore_unfixed: false
+  skip_update: {{ harbor_trivy_offline_scan | lower }}
+  skip_java_db_update: {{ harbor_trivy_offline_scan | lower }}
+  offline_scan: {{ harbor_trivy_offline_scan | lower }}
+  security_check: vuln
+  insecure: false
+
+jobservice:
+  max_job_workers: 10
+  job_loggers:
+    - STD_OUTPUT
+    - FILE
+  logger_sweeper_duration: 1
+
+# 11번 Runbook 7.1 명시: Prometheus가 :9090/metrics로 Harbor 자체 지표를 스크레이프
+metric:
+  enabled: true
+  port: {{ harbor_metric_port }}
+  path: /metrics
+
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3
+
+log:
+  level: info
+  local:
+    rotate_count: {{ harbor_log_rotate_count }}
+    rotate_size: {{ harbor_log_rotate_size }}
+    location: {{ harbor_log_location }}
+
+_version: 2.13.0
+
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy: 127.0.0.1,localhost,{{ harbor_hostname }},{{ ansible_host }},core,jobservice,trivy-adapter
+  components:
+    - core
+    - jobservice
+    - trivy
+
+upload_purging:
+  enabled: true
+  age: 168h
+  interval: 24h
+  dryrun: false
+
+cache:
+  enabled: false
+  expire_hours: 24

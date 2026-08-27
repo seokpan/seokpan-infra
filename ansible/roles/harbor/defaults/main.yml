@@ -1,0 +1,61 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/harbor/defaults/main.yml
+# 공통 기본값. harbor-01 고유 값(hostname, 인증서 경로, 비밀번호)은
+# inventory/host_vars/harbor.yml 에서 override 한다.
+
+# --- Harbor 버전/설치 경로 ---
+harbor_version: "v2.15.2"
+harbor_installer_url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/harbor-offline-installer-{{ harbor_version }}.tgz"
+harbor_installer_download_dir: "/root"
+harbor_install_dir: "/root/harbor"
+
+# --- Docker (Harbor Compose 구동에 필요, containerd/kubeadm과 별개) ---
+harbor_docker_repo_baseurl: "https://download.docker.com/linux/centos/docker-ce.repo"
+harbor_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-compose-plugin
+harbor_docker_service: docker
+
+# --- Firewall 관리 여부 ---
+# harbor-01은 내부망 전용 서버로 방화벽(firewalld)이 존재하지 않는다.
+# 05 물리 아키텍처 7.2 표의 Client -> Harbor 443/TCP 등 허용은
+# 이미 VRouter/Network 경계에서 처리되므로 이 role에서 firewalld를 건드리지 않는다.
+harbor_manage_firewall: false
+
+# --- Firewall (host_firewall 표 7.2 기준: Client -> Harbor 443/TCP) ---
+# 9090은 Prometheus 스크레이프용 - NetworkPolicy/host_firewall에서 Prometheus 대역만 허용되도록
+# 별도로 좁혀야 함 (harbor_manage_firewall: true일 때만 사용)
+harbor_firewall_ports:
+  - "80"
+  - "443"
+  - "{{ harbor_metric_port }}"
+
+# --- Harbor 서비스 설정 (host_vars/harbor.yml에서 대부분 override) ---
+harbor_https_port: 443
+harbor_http_port: 80
+harbor_data_volume: "/data"
+
+# 11번 Runbook 4장 표 명시: Harbor :9090(metrics) - Prometheus 스크레이프 대상
+harbor_metric_port: 9090
+
+# --- Trivy 오프라인 스캔 (에어갭) ---
+harbor_trivy_offline_scan: true
+
+# --- 로그 ---
+harbor_log_rotate_count: 50
+harbor_log_rotate_size: "200M"
+harbor_log_location: "/var/log/harbor"
+
+# --- 서명 검증 (선택, 기본 비활성 - v2.15.0부터 GPG .asc 폐지, Cosign keyless로 대체) ---
+harbor_verify_signature: false
+
+# --- SHA256 체크섬 검증 (11번 Runbook 2장 명시: "Offline Installer SHA256 검증") ---
+# version-lock.yml에 고정한 실제 체크섬 값을 여기 또는 host_vars에서 override.
+# 빈 값이면 검증 task를 skip한다 (초기 구현 시 실제 값 채워 넣을 것).
+harbor_installer_sha256: ""
+

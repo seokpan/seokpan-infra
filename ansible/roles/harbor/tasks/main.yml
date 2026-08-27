@@ -1,0 +1,337 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/harbor/tasks/main.yml
+
+# ============================================================
+# 1. 필수 변수 확인
+# ============================================================
+
+- name: Verify Harbor variables
+  ansible.builtin.assert:
+    that:
+      - harbor_hostname is defined
+      - harbor_https_port is defined
+      - harbor_data_volume is defined
+      - harbor_cert_path is defined
+      - harbor_key_path is defined
+      - harbor_admin_password is defined
+      - harbor_db_password is defined
+      - harbor_firewall_ports is defined
+    fail_msg: >-
+      Required Harbor variables are missing
+      for {{ inventory_hostname }}.
+
+
+# ============================================================
+# 2. 이미 설치되어 있는지 확인 (멱등성 판단)
+# ============================================================
+
+- name: Check harbor-core container state
+  ansible.builtin.command:
+    cmd: docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' harbor-core
+  register: harbor_core_running
+  changed_when: false
+  failed_when: false
+
+- name: Set install-needed fact
+  ansible.builtin.set_fact:
+    harbor_already_installed: "{{ harbor_core_running.stdout == 'true' }}"
+
+
+# ============================================================
+# 3. Docker 설치 (Harbor Compose 구동에 필요)
+# ============================================================
+
+- name: Install dnf-plugins-core
+  ansible.builtin.dnf:
+    name: dnf-plugins-core
+    state: present
+
+- name: Add Docker CE repo
+  ansible.builtin.command:
+    cmd: dnf config-manager --add-repo {{ harbor_docker_repo_baseurl }}
+    creates: /etc/yum.repos.d/docker-ce.repo
+
+- name: Install Docker packages
+  ansible.builtin.dnf:
+    name: "{{ harbor_docker_packages }}"
+    state: present
+
+- name: Enable and start docker
+  ansible.builtin.service:
+    name: "{{ harbor_docker_service }}"
+    enabled: true
+    state: started
+
+
+# ============================================================
+# 4. firewalld 확인 및 실행
+#
+# harbor-01은 내부망 전용 서버로 방화벽이 존재하지 않는다.
+# harbor_manage_firewall: true로 override할 때만 아래 5개 task를 수행한다.
+# ============================================================
+
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+  when: harbor_manage_firewall
+
+
+- name: Enable and start firewalld
+  ansible.builtin.service:
+    name: firewalld
+    enabled: true
+    state: started
+  when: harbor_manage_firewall
+
+
+# ============================================================
+# 5. Runtime Firewall Port 확인
+# ============================================================
+
+- name: Check Harbor runtime firewall ports
+  ansible.builtin.command:
+    cmd: firewall-cmd --query-port={{ item }}/tcp
+  loop: "{{ harbor_firewall_ports }}"
+  register: harbor_runtime_firewall_check
+  changed_when: false
+  failed_when: false
+  when: harbor_manage_firewall
+
+
+# ============================================================
+# 6. Runtime Firewall Port 열기
+# ============================================================
+
+- name: Open Harbor runtime firewall ports
+  ansible.builtin.command:
+    cmd: firewall-cmd --add-port={{ item.item }}/tcp
+  loop: "{{ harbor_runtime_firewall_check.results }}"
+  when:
+    - harbor_manage_firewall
+    - item.rc != 0
+
+
+# ============================================================
+# 7. Permanent Firewall 확인
+# ============================================================
+
+- name: Check Harbor permanent firewall ports
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --query-port={{ item }}/tcp
+  loop: "{{ harbor_firewall_ports }}"
+  register: harbor_permanent_firewall_check
+  changed_when: false
+  failed_when: false
+  when: harbor_manage_firewall
+
+
+# ============================================================
+# 8. Permanent Firewall Port 열기
+# ============================================================
+
+- name: Open Harbor firewall ports permanently
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port={{ item.item }}/tcp
+  loop: "{{ harbor_permanent_firewall_check.results }}"
+  when:
+    - harbor_manage_firewall
+    - item.rc != 0
+  notify: Reload firewalld
+
+
+# ============================================================
+# 9. TLS 인증서/키 존재 확인 (internal_ca / tls_deploy role 산출물)
+# ============================================================
+
+- name: Check TLS certificate and key exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ harbor_cert_path }}"
+    - "{{ harbor_key_path }}"
+  register: harbor_tls_check
+
+- name: Verify TLS files exist before install
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: >-
+      {{ item.item }} 파일이 없습니다.
+      internal_ca / tls_deploy role이 harbor role보다 먼저 실행되었는지 확인하세요.
+  loop: "{{ harbor_tls_check.results }}"
+  when: not harbor_already_installed
+
+
+# ============================================================
+# 10. 설치 디렉토리 준비
+# ============================================================
+
+- name: Ensure Harbor directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ harbor_install_dir }}"
+    - "{{ harbor_data_volume }}"
+
+
+# ============================================================
+# 11. 오프라인 인스톨러 다운로드 및 압축 해제
+# ============================================================
+
+- name: Download Harbor offline installer
+  ansible.builtin.get_url:
+    url: "{{ harbor_installer_url }}"
+    dest: "{{ harbor_installer_download_dir }}/harbor-offline-installer-{{ harbor_version }}.tgz"
+    mode: "0644"
+  when: not harbor_already_installed
+
+# 11번 Runbook 2장: "Offline Installer SHA256 검증"을 실행 착수 조건으로 명시.
+# version-lock.yml에 값이 채워지기 전(harbor_installer_sha256 빈 값)에는 skip하고 경고만 출력.
+- name: Verify installer SHA256 checksum
+  ansible.builtin.stat:
+    path: "{{ harbor_installer_download_dir }}/harbor-offline-installer-{{ harbor_version }}.tgz"
+    checksum_algorithm: sha256
+  register: harbor_installer_stat
+  when:
+    - not harbor_already_installed
+    - harbor_installer_sha256 | length > 0
+
+- name: Assert checksum matches version-lock.yml
+  ansible.builtin.assert:
+    that:
+      - harbor_installer_stat.stat.checksum == harbor_installer_sha256
+    fail_msg: >-
+      SHA256 불일치: 다운로드한 인스톨러가 손상되었거나 위변조되었을 수 있습니다.
+      재다운로드하거나 version-lock.yml의 값을 다시 확인하세요.
+  when:
+    - not harbor_already_installed
+    - harbor_installer_sha256 | length > 0
+
+- name: Warn if checksum not pinned yet
+  ansible.builtin.debug:
+    msg: >-
+      경고: harbor_installer_sha256 값이 비어 있어 체크섬 검증을 건너뜁니다.
+      version-lock.yml에 실제 SHA256을 고정한 뒤 defaults/main.yml 또는 host_vars에 채워 넣으세요.
+  when:
+    - not harbor_already_installed
+    - harbor_installer_sha256 | length == 0
+
+- name: Extract Harbor installer
+  ansible.builtin.unarchive:
+    src: "{{ harbor_installer_download_dir }}/harbor-offline-installer-{{ harbor_version }}.tgz"
+    dest: "{{ harbor_installer_download_dir }}"
+    remote_src: true
+    creates: "{{ harbor_install_dir }}/install.sh"
+  when: not harbor_already_installed
+
+
+# ============================================================
+# 12. harbor.yml 배포
+# ============================================================
+
+- name: Deploy harbor.yml configuration
+  ansible.builtin.template:
+    src: harbor.yml.j2
+    dest: "{{ harbor_install_dir }}/harbor.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+
+# ============================================================
+# 13. ./prepare 및 ./install.sh 실행
+# ============================================================
+
+- name: Run Harbor prepare
+  ansible.builtin.command:
+    cmd: ./prepare
+    chdir: "{{ harbor_install_dir }}"
+  register: harbor_prepare_result
+  changed_when: "'Generated configuration file' in harbor_prepare_result.stdout"
+  when: not harbor_already_installed
+
+- name: Run Harbor install.sh
+  ansible.builtin.command:
+    cmd: ./install.sh
+    chdir: "{{ harbor_install_dir }}"
+  register: harbor_install_result
+  changed_when: "'Harbor has been installed and started successfully' in harbor_install_result.stdout"
+  failed_when: >
+    harbor_install_result.rc != 0 or
+    'Harbor has been installed and started successfully' not in harbor_install_result.stdout
+  when: not harbor_already_installed
+
+
+# ============================================================
+# 14. Handler 즉시 적용
+# ============================================================
+
+- name: Apply pending handlers
+  ansible.builtin.meta: flush_handlers
+
+
+# ============================================================
+# 15. HTTPS 리스너 확인
+# ============================================================
+
+- name: Read listening ports
+  ansible.builtin.command:
+    cmd: ss -lnt
+  register: harbor_listeners
+  changed_when: false
+
+- name: Verify Harbor HTTPS listener
+  ansible.builtin.assert:
+    that:
+      - (':' ~ harbor_https_port) in harbor_listeners.stdout
+    fail_msg: "Harbor is not listening on :{{ harbor_https_port }}."
+    success_msg: "Harbor is listening on :{{ harbor_https_port }}."
+
+
+# ============================================================
+# 16. HTTPS 응답 및 TLS 확인
+# ============================================================
+
+- name: Verify Harbor HTTPS response
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}"
+    validate_certs: false
+    status_code: [200, 301, 302]
+  register: harbor_health_check
+  retries: 5
+  delay: 5
+  until: harbor_health_check.status in [200, 301, 302]
+
+- name: Check certificate SAN
+  ansible.builtin.command:
+    cmd: >
+      openssl s_client -connect {{ harbor_hostname }}:{{ harbor_https_port }}
+      -servername {{ harbor_hostname }}
+    args:
+      stdin: ""
+  register: harbor_tls_probe
+  changed_when: false
+  failed_when: false
+
+
+# ============================================================
+# 17. 최종 상태 출력
+# ============================================================
+
+- name: Display Harbor summary
+  ansible.builtin.debug:
+    msg:
+      - "Harbor Hostname = {{ harbor_hostname }}"
+      - "HTTPS = https://{{ harbor_hostname }}:{{ harbor_https_port }}"
+      - "Data Volume = {{ harbor_data_volume }}"
+      - "HTTPS Health Check = {{ harbor_health_check.status }}"
+      - "SAN 포함 여부 = {{ harbor_hostname in harbor_tls_probe.stdout }}"

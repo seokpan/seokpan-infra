@@ -1,0 +1,20 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# inventory/host_vars/harbor.yml
+# harbor-01(192.168.53.61) 고유 값. 공통 기본값은 roles/harbor/defaults/main.yml 참고.
+
+harbor_hostname: harbor.stone.test
+harbor_https_port: 443
+harbor_http_port: 80
+harbor_data_volume: /data
+
+# internal_ca / tls_deploy role 결과물과 반드시 일치시킬 것
+harbor_cert_path: /data/secret/tls/harbor.stone.test.crt
+harbor_key_path: /data/secret/tls/harbor.stone.test.key
+
+# 민감정보 - 평문 금지, ansible-vault로 암호화한 별도 파일에서 정의
+# 예: inventory/host_vars/harbor_vault.yml (ansible-vault encrypt)
+harbor_admin_password: "{{ vault_harbor_admin_password }}"
+harbor_db_password: "{{ vault_harbor_db_password }}"
