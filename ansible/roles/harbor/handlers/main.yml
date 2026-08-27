@@ -1,0 +1,15 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/harbor/handlers/main.yml
+
+- name: Reload firewalld
+  ansible.builtin.service:
+    name: firewalld
+    state: reloaded
+
+- name: Restart docker
+  ansible.builtin.service:
+    name: "{{ harbor_docker_service }}"
+    state: restarted

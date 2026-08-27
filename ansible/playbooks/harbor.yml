@@ -1,0 +1,10 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+
+- name: Install and Configure Harbor Registry
+  hosts: registry
+  become: true
+
+  roles:
+    - harbor
