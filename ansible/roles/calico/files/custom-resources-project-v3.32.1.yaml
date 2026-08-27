@@ -1,3 +1,10 @@
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Define the project Calico network configuration
+# Created: 2026-08-26 12:00:38 KST (first tracked in Git)
+# Updated: 2026-08-27 15:55:40 KST
+
 # This section includes base Calico installation configuration.
 # For more information, see: https://docs.tigera.io/calico/latest/reference/installation/api#operator.tigera.io/v1.Installation
 apiVersion: operator.tigera.io/v1
