@@ -2,7 +2,11 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: kubeadm control plane bootstrap
+# Purpose: Bootstrap the first Kubernetes control plane with kubeadm
+
+# ------------------------------------------------------------
+# kubeadm configuration
+# ------------------------------------------------------------
 
 - name: Ensure Kubernetes configuration directory exists
   ansible.builtin.file:
@@ -19,3 +23,72 @@
     owner: root
     group: root
     mode: "0600"
+
+- name: Validate kubeadm configuration
+  ansible.builtin.command:
+    cmd: "kubeadm config validate --config {{ kubeadm_config_file }}"
+  changed_when: false
+
+# ------------------------------------------------------------
+# Bootstrap state
+# ------------------------------------------------------------
+
+- name: Check whether first control plane is already initialized
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_admin_conf
+
+- name: Bootstrap first Kubernetes control plane
+  ansible.builtin.command:
+    cmd: "kubeadm init --config {{ kubeadm_config_file }} --skip-token-print"
+  when: not kubeadm_admin_conf.stat.exists
+  register: kubeadm_init_result
+  changed_when: kubeadm_init_result.rc == 0
+
+# ------------------------------------------------------------
+# Root kubectl environment
+# ------------------------------------------------------------
+
+- name: Ensure root kubeconfig directory exists
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Configure root kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+# ------------------------------------------------------------
+# Bootstrap validation
+# ------------------------------------------------------------
+
+- name: Wait for Kubernetes API server
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig=/etc/kubernetes/admin.conf get --raw=/readyz
+  register: kube_api_ready
+  retries: 30
+  delay: 5
+  until: kube_api_ready.rc == 0
+  changed_when: false
+
+- name: Check first control plane node registration
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig=/etc/kubernetes/admin.conf get node {{ inventory_hostname }} -o name
+  register: control_plane_node
+  changed_when: false
+
+- name: Assert first control plane bootstrap result
+  ansible.builtin.assert:
+    that:
+      - kube_api_ready.stdout == "ok"
+      - control_plane_node.stdout == "node/" ~ inventory_hostname
+    fail_msg: "First Kubernetes control plane bootstrap validation failed on {{ inventory_hostname }}"
+    success_msg: "First Kubernetes control plane bootstrap validation passed on {{ inventory_hostname }}"
