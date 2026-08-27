@@ -1,0 +1,28 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-08-27
+#
+# roles/internal_ca/defaults/main.yml
+#
+# Root CA는 Ansible Controller(192.168.54.70) 안에서만 생성/보관된다.
+# 개인키(ca.key)는 어떤 경우에도 다른 호스트로 복사하거나 git에 커밋하지 않는다.
+#
+# 2026-08-27 팀 협의: ca.key는 이유빈님의 Ansible 배포 대상에서 제외하고,
+# 최유준(cyj) 계정 소유로 좁혀서 "실수로 다른 자동화가 건드리는 것"을 방지한다.
+# (root 권한을 가진 계정의 접근 자체를 막지는 못하는 점은 인지하고 있음 - 필요시
+#  ca.key를 ansible-vault로 추가 암호화하는 방안을 후속으로 검토)
+
+internal_ca_owner: cyj
+internal_ca_group: cyj
+
+internal_ca_dir: /etc/pki/seokpan-ca
+internal_ca_key_path: "{{ internal_ca_dir }}/ca.key"
+internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+
+internal_ca_common_name: "Seokpan Internal Root CA"
+internal_ca_organization: "seokpan"
+internal_ca_country: "KR"
+
+# Root CA 유효기간 (10년) - 서비스 인증서보다 훨씬 길게
+internal_ca_days: 3650
+internal_ca_key_bits: 4096
