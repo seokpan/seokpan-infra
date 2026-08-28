@@ -1,0 +1,46 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 08/28
+#
+# Role: argocd_bootstrap
+# 목적: Argo CD v3.4.7 설치 + Root Application(App-of-Apps) 등록
+# 참고: 06_石나가는_판단_Ansible_자동화·테스트_설계 §6, §9.3 /
+#       11_MVP_구축·자동화_Runbook §7.2, §9, §13
+#
+# 팀 requirements.yml/requirements.txt 확정(2026-08-27):
+#   ansible-core==2.20.8, python kubernetes==36.0.3, kubernetes.core==6.5.0
+#   → 본 Role은 kubectl command 우회 대신 kubernetes.core.k8s / k8s_info 모듈 사용
+
+argocd_namespace: argocd
+argocd_version: "v3.4.7"
+
+# Release Manifest + Digest 고정 (version-lock.yml과 동일 값 유지)
+argocd_manifest_url: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
+argocd_manifest_local_path: "/tmp/argocd-install-{{ argocd_version }}.yaml"
+# version-lock.yml에 기록된 install.yaml SHA256 (freeze 절차 준수, 실측 후 채움)
+argocd_manifest_checksum: ""   # 예: "sha256:xxxxxxxx..."
+
+# 대형 CRD(client-side apply 시 annotation 262144 byte 한도 초과 이력) — 재검증 대상 목록
+argocd_large_crds:
+  - applicationsets.argoproj.io
+
+# Server-Side Apply field manager 이름 (충돌 추적용)
+argocd_field_manager: "ansible-argocd-bootstrap"
+
+# kubectl/모듈 실행 컨텍스트 (cp-03 수동 검증과 동일 kubeconfig 기준)
+argocd_kubeconfig: "/etc/kubernetes/admin.conf"
+
+# Root Application(App-of-Apps)
+gitops_repo_url: "https://github.com/<org>/stone-judgment-gitops.git"
+gitops_repo_revision: "main"
+gitops_root_path: "apps/root"
+root_application_name: "root"
+root_application_namespace: "{{ argocd_namespace }}"
+root_application_project: "default"
+
+# 대기/재시도 정책 (초 단위)
+argocd_ready_retries: 30
+argocd_ready_delay: 10
+argocd_ready_timeout: "{{ argocd_ready_retries | int * argocd_ready_delay | int }}"
+root_app_sync_retries: 20
+root_app_sync_delay: 15

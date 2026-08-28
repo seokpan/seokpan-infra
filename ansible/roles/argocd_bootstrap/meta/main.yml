@@ -1,0 +1,5 @@
+---
+# Owner: 최유준
+# Scope: Delivery / Observability - Argo CD Bootstrap
+# Project: 石나가는 판단
+# Purpose: Install Argo CD (v3.4.7) and register platform-app Application

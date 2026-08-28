@@ -352,3 +352,8 @@
       - "Data Volume = {{ harbor_data_volume }}"
       - "HTTPS Health Check = {{ harbor_health_check.status | default('N/A') }}"
       - "SAN 포함 여부 = {{ harbor_hostname in (harbor_tls_probe.stdout | default('')) }}"
+
+
+- include_tasks: harbor_project.yml
+- include_tasks: robot_account.yml
+

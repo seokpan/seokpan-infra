@@ -1,0 +1,44 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-08-28
+#
+# [위치] harbor role이 아니라 별도 위치 권장 — Harbor는 VM 대상 role이고 이 Task는
+# Kubernetes Cluster 대상이라 성격이 다름. stage 70-platform.yml에서, Jenkins 네임스페이스가
+# 이미 존재하는 시점(Argo CD가 apps/root 통해 jenkins 네임스페이스 Sync한 이후) 이후에 실행.
+#
+# [원칙, 06 문서 4.1] "Kubernetes Secret의 실제 값은 Ansible이 최초 주입하거나 승인된 Secret
+# 전달 절차가 주입하며, Argo CD는 Secret 참조만 관리한다." — 그래서 이 Secret들은
+# seokpan-gitops repo에 커밋하지 않고, Ansible이 kubectl로 클러스터에 직접 적용합니다.
+# Jenkins Deployment/JCasC(Git에 있음)는 이 Secret의 "이름"만 참조합니다.
+#
+# [kubectl 사용 이유] kubernetes.core 사용은 팀 requirements.yml/txt 확정 전까지 보류 원칙
+# (argocd_bootstrap role과 동일한 판단 기준 적용) — command 모듈로 kubectl 직접 호출.
+#
+# [주의, 08/28] harbor_hostname / harbor_robot_name은 group_vars/harbor/vars.yml에 정의되어
+# harbor 그룹(호스트) 대상 Play에서만 자동으로 보입니다. 이 Task는 K8s 대상 Play에서 실행되므로
+# hostvars['harbor'].변수명 형태로 명시적으로 끌어옵니다 (인벤토리 상의 실제 호스트/그룹명이
+# "harbor"가 맞는지 확인 필요 — 다르면 아래 hostvars['harbor'] 부분을 실제 이름으로 교체).
+#
+# [멱등성] kubectl 재실행 시 동일 값으로 덮어써도 안전하도록 `kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -` 패턴 사용.
+
+- name: harbor-robot-dockerconfig Secret 적용 (BuildKit rootless Agent Pod가 마운트)
+  ansible.builtin.shell: |
+    kubectl create secret docker-registry harbor-robot-dockerconfig \
+      --namespace=jenkins \
+      --docker-server={{ hostvars['harbor'].harbor_hostname }} \
+      --docker-username="robot${{ hostvars['harbor'].harbor_robot_name }}" \
+      --docker-password="{{ vault_harbor_robot_secret }}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  no_log: true   # 커맨드 라인 자체에 password가 노출되므로 로그에 남기지 않음
+  changed_when: true   # dry-run+apply 조합은 changed_when 판단이 애매해서 항상 changed로 표시,
+                        # 정밀한 idempotency 보고가 필요하면 이후 diff 기반으로 개선 가능
+
+- name: jenkins-harbor-credential Secret 적용 (JCasC 환경변수 치환용, Jenkins Credential Store 바인딩)
+  ansible.builtin.shell: |
+    kubectl create secret generic jenkins-harbor-credential \
+      --namespace=jenkins \
+      --from-literal=username="robot${{ hostvars['harbor'].harbor_robot_name }}" \
+      --from-literal=password="{{ vault_harbor_robot_secret }}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  no_log: true
+  changed_when: true
+
