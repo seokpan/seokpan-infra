@@ -2,4 +2,24 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: k8s_addons default variables
+# Purpose: Kubernetes Add-on version and local manifest definitions
+# 최초 작성 시간: 2026-08-26 12:00:38 KST
+# 수정 시간: 2026-08-28 18:51:29 KST
+
+gateway_api_version: "v1.5.1"
+nginx_gateway_fabric_version: "v2.6.7"
+
+k8s_addons_remote_dir: "/var/lib/seokpan/k8s-addons"
+
+gateway_api_manifest_file: "upstream/gateway-api-v1.5.1-standard.yaml"
+ngf_crds_manifest_file: "upstream/ngf-v2.6.7-crds.yaml"
+ngf_controller_manifest_file: "ngf-v2.6.7-controller.yaml"
+
+gateway_api_remote_manifest: >-
+  {{ k8s_addons_remote_dir }}/gateway-api-v1.5.1-standard.yaml
+
+ngf_crds_remote_manifest: >-
+  {{ k8s_addons_remote_dir }}/ngf-v2.6.7-crds.yaml
+
+ngf_controller_remote_manifest: >-
+  {{ k8s_addons_remote_dir }}/ngf-v2.6.7-controller.yaml
