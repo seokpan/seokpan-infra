@@ -2,4 +2,145 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: k8s_addons tasks
+# Purpose: Gateway API and NGINX Gateway Fabric bootstrap
+# 최초 작성 시간: 2026-08-26 12:00:38 KST
+# 수정 시간: 2026-08-28 19:08:32 KST
+
+- name: Create Kubernetes Add-on manifest directory
+  ansible.builtin.file:
+    path: "{{ k8s_addons_remote_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy Gateway API standard manifest
+  ansible.builtin.copy:
+    src: "{{ gateway_api_manifest_file }}"
+    dest: "{{ gateway_api_remote_manifest }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy NGINX Gateway Fabric CRD manifest
+  ansible.builtin.copy:
+    src: "{{ ngf_crds_manifest_file }}"
+    dest: "{{ ngf_crds_remote_manifest }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy NGINX Gateway Fabric controller manifest
+  ansible.builtin.copy:
+    src: "{{ ngf_controller_manifest_file }}"
+    dest: "{{ ngf_controller_remote_manifest }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Check Gateway API manifest difference
+  ansible.builtin.command:
+    cmd: "kubectl diff -f {{ gateway_api_remote_manifest }}"
+  register: gateway_api_diff
+  changed_when: false
+  failed_when: gateway_api_diff.rc not in [0, 1]
+
+- name: Apply Gateway API standard CRDs
+  ansible.builtin.command:
+    cmd: "kubectl apply -f {{ gateway_api_remote_manifest }}"
+  when: gateway_api_diff.rc == 1
+  changed_when: true
+
+- name: Wait for GatewayClass CRD to be established
+  ansible.builtin.command:
+    cmd: >-
+      kubectl wait
+      --for=condition=Established
+      crd/gatewayclasses.gateway.networking.k8s.io
+      --timeout=120s
+  changed_when: false
+
+- name: Wait for Gateway CRD to be established
+  ansible.builtin.command:
+    cmd: >-
+      kubectl wait
+      --for=condition=Established
+      crd/gateways.gateway.networking.k8s.io
+      --timeout=120s
+  changed_when: false
+
+- name: Check NGINX Gateway Fabric CRD difference
+  ansible.builtin.command:
+    cmd: "kubectl diff --server-side -f {{ ngf_crds_remote_manifest }}"
+  register: ngf_crds_diff
+  changed_when: false
+  failed_when: ngf_crds_diff.rc not in [0, 1]
+
+- name: Apply NGINX Gateway Fabric CRDs
+  ansible.builtin.command:
+    cmd: "kubectl apply --server-side -f {{ ngf_crds_remote_manifest }}"
+  when: ngf_crds_diff.rc == 1
+  changed_when: true
+
+- name: Wait for NginxGateway CRD to be established
+  ansible.builtin.command:
+    cmd: >-
+      kubectl wait
+      --for=condition=Established
+      crd/nginxgateways.gateway.nginx.org
+      --timeout=120s
+  changed_when: false
+
+- name: Wait for NginxProxy CRD to be established
+  ansible.builtin.command:
+    cmd: >-
+      kubectl wait
+      --for=condition=Established
+      crd/nginxproxies.gateway.nginx.org
+      --timeout=120s
+  changed_when: false
+
+- name: Check NGINX Gateway Fabric controller difference
+  ansible.builtin.command:
+    cmd: "kubectl diff -f {{ ngf_controller_remote_manifest }}"
+  register: ngf_controller_diff
+  changed_when: false
+  failed_when: ngf_controller_diff.rc not in [0, 1]
+
+- name: Apply NGINX Gateway Fabric controller
+  ansible.builtin.command:
+    cmd: "kubectl apply -f {{ ngf_controller_remote_manifest }}"
+  when: ngf_controller_diff.rc == 1
+  changed_when: true
+
+- name: Wait for NGINX Gateway Fabric controller rollout
+  ansible.builtin.command:
+    cmd: >-
+      kubectl rollout status deployment/nginx-gateway
+      -n nginx-gateway
+      --timeout=180s
+  changed_when: false
+
+- name: Check GatewayClass nginx
+  ansible.builtin.command:
+    cmd: kubectl get gatewayclass nginx
+  register: nginx_gatewayclass
+  changed_when: false
+
+- name: Check NGINX Gateway Fabric controller pods
+  ansible.builtin.command:
+    cmd: >-
+      kubectl get pods
+      -n nginx-gateway
+      -l app.kubernetes.io/name=nginx-gateway
+      -o wide
+  register: ngf_pods
+  changed_when: false
+
+- name: Show Gateway Add-on validation result
+  ansible.builtin.debug:
+    msg:
+      - "Gateway API={{ gateway_api_version }}"
+      - "NGINX Gateway Fabric={{ nginx_gateway_fabric_version }}"
+      - "{{ nginx_gatewayclass.stdout_lines | default([]) }}"
+      - "{{ ngf_pods.stdout_lines | default([]) }}"
