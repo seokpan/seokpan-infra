@@ -1,0 +1,12 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: kubeadm additional control plane join default variables
+
+kubeadm_control_plane_join_source: "cp-01"
+kubeadm_control_plane_join_token_ttl: "15m"
+
+kubeadm_control_plane_join_admin_conf: "/etc/kubernetes/admin.conf"
+kubeadm_control_plane_join_kubelet_conf: "/etc/kubernetes/kubelet.conf"
+kubeadm_control_plane_join_manifest_dir: "/etc/kubernetes/manifests"
