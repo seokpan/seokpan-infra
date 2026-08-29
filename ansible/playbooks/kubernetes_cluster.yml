@@ -2,10 +2,17 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: Bootstrap Kubernetes control plane
+# Purpose: Bootstrap Kubernetes control plane and worker nodes
 
 - name: Prepare first Kubernetes control plane
   hosts: cp-01
   gather_facts: true
   roles:
     - kubeadm_control_plane
+
+- name: Prepare Kubernetes worker nodes
+  hosts: workers
+  gather_facts: true
+  serial: 1
+  roles:
+    - kubeadm_worker
