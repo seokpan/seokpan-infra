@@ -1,0 +1,8 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: mariadb role entrypoint
+
+- name: Install MariaDB packages
+  ansible.builtin.import_tasks: install.yml
