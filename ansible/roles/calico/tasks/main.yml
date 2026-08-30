@@ -2,4 +2,210 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: calico tasks
+# Purpose: Install and validate Calico through Tigera Operator
+
+# ------------------------------------------------------------
+# Operator CRD
+# ------------------------------------------------------------
+
+- name: Check Tigera Installation CRD
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      get crd installations.operator.tigera.io
+  register: calico_installation_crd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install Tigera CRDs
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      apply
+      --server-side
+      -f -
+    stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/' ~ calico_crd_manifest) }}"
+  register: calico_crd_apply
+  when:
+    - calico_installation_crd.rc != 0
+    - not ansible_check_mode
+  changed_when: true
+
+- name: Wait for Tigera Installation CRD
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      get crd installations.operator.tigera.io
+  register: calico_installation_crd_after
+  changed_when: false
+  check_mode: false
+  retries: 30
+  delay: 2
+  until: calico_installation_crd_after.rc == 0
+
+# ------------------------------------------------------------
+# Tigera Operator
+# ------------------------------------------------------------
+
+- name: Check Tigera Operator deployment
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      -n {{ calico_operator_namespace }}
+      get deployment {{ calico_operator_deployment }}
+  register: calico_operator_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install Tigera Operator
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      apply
+      --server-side
+      -f -
+    stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/' ~ calico_operator_manifest) }}"
+  register: calico_operator_apply
+  when:
+    - calico_operator_state.rc != 0
+    - not ansible_check_mode
+  changed_when: true
+
+- name: Wait for Tigera Operator rollout
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      -n {{ calico_operator_namespace }}
+      rollout status
+      deployment/{{ calico_operator_deployment }}
+      --timeout=180s
+  register: calico_operator_rollout
+  changed_when: false
+  check_mode: false
+
+# ------------------------------------------------------------
+# Project Installation
+# ------------------------------------------------------------
+
+- name: Check project Calico Installation
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      get installation.operator.tigera.io default
+      -o json
+  register: calico_installation_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check project Calico API server
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      get apiserver.operator.tigera.io default
+      -o json
+  register: calico_apiserver_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Apply project Calico custom resources
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      apply
+      --server-side
+      -f -
+    stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/' ~ calico_custom_resources_manifest) }}"
+  register: calico_custom_resources_apply
+  when:
+    - calico_installation_state.rc != 0 or calico_apiserver_state.rc != 0
+    - not ansible_check_mode
+  changed_when: true
+
+- name: Read project Calico Installation
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      get installation.operator.tigera.io default
+      -o json
+  register: calico_installation_current
+  changed_when: false
+  check_mode: false
+  retries: 30
+  delay: 2
+  until: calico_installation_current.rc == 0
+
+- name: Validate project Calico network configuration
+  ansible.builtin.assert:
+    that:
+      - (calico_installation_current.stdout | from_json).spec.calicoNetwork.bgp == calico_expected_bgp
+      - (calico_installation_current.stdout | from_json).spec.calicoNetwork.mtu | int == calico_expected_mtu
+      - (calico_installation_current.stdout | from_json).spec.calicoNetwork.ipPools[0].cidr == calico_expected_cidr
+      - (calico_installation_current.stdout | from_json).spec.calicoNetwork.ipPools[0].blockSize | int == calico_expected_block_size
+      - (calico_installation_current.stdout | from_json).spec.calicoNetwork.ipPools[0].encapsulation == calico_expected_encapsulation
+      - (calico_installation_current.stdout | from_json).spec.calicoNetwork.ipPools[0].natOutgoing == calico_expected_nat_outgoing
+    fail_msg: >-
+      Current Calico Installation does not match the project network baseline.
+      Automatic destructive reconciliation is not allowed.
+    success_msg: >-
+      Current Calico Installation matches the project network baseline.
+
+# ------------------------------------------------------------
+# Runtime validation
+# ------------------------------------------------------------
+
+- name: Wait for calico-node rollout
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig={{ calico_kubeconfig }}
+      -n calico-system
+      rollout status daemonset/calico-node
+      --timeout=180s
+  register: calico_node_rollout
+  changed_when: false
+  check_mode: false
+
+- name: Validate TigeraStatus health
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+
+      kubectl \
+        --kubeconfig={{ calico_kubeconfig }} \
+        get tigerastatus \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{range .status.conditions[*]}{.type}={.status}{";"}{end}{"\n"}{end}'
+  args:
+    executable: /bin/bash
+  register: calico_tigera_status_health
+  changed_when: false
+  check_mode: false
+  failed_when: >-
+    calico_tigera_status_health.rc != 0
+    or 'Available=False' in calico_tigera_status_health.stdout
+    or 'Progressing=True' in calico_tigera_status_health.stdout
+    or 'Degraded=True' in calico_tigera_status_health.stdout
+
+- name: Assert required TigeraStatus resources are available
+  ansible.builtin.assert:
+    that:
+      - calico_tigera_status_health.stdout is regex('(?m)^calico\|.*Available=True;')
+      - calico_tigera_status_health.stdout is regex('(?m)^ippools\|.*Available=True;')
+      - calico_tigera_status_health.stdout is regex('(?m)^apiserver\|.*Available=True;')
+    fail_msg: >-
+      Required Calico TigeraStatus resources are not available.
+    success_msg: >-
+      Required Calico TigeraStatus validation passed.
