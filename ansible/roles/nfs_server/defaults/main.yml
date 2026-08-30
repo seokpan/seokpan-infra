@@ -1,0 +1,9 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: nfs_server role default variables
+
+nfs_utils_version: "2.5.4-45.el9"
+nfs_server_packages:
+  - "nfs-utils-{{ nfs_utils_version }}"
