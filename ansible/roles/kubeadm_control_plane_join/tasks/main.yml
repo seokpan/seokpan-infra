@@ -1,0 +1,186 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Project: 石나가는 판단
+# Purpose: Join additional Kubernetes control plane nodes
+
+# ------------------------------------------------------------
+# Existing state
+# ------------------------------------------------------------
+
+- name: Check control plane admin configuration
+  ansible.builtin.stat:
+    path: "{{ kubeadm_control_plane_join_admin_conf }}"
+  register: kubeadm_cp_join_admin_conf
+
+- name: Check control plane kubelet configuration
+  ansible.builtin.stat:
+    path: "{{ kubeadm_control_plane_join_kubelet_conf }}"
+  register: kubeadm_cp_join_kubelet_conf
+
+- name: Check existing etcd static pod manifest
+  ansible.builtin.stat:
+    path: "{{ kubeadm_control_plane_join_manifest_dir }}/etcd.yaml"
+  register: kubeadm_cp_join_etcd_manifest
+
+- name: Guard against partial control plane state
+  ansible.builtin.assert:
+    that:
+      - >-
+        kubeadm_cp_join_admin_conf.stat.exists
+        or
+        (
+          not kubeadm_cp_join_kubelet_conf.stat.exists
+          and
+          not kubeadm_cp_join_etcd_manifest.stat.exists
+        )
+    fail_msg: >-
+      Partial Kubernetes control plane state detected on
+      {{ inventory_hostname }}. Automatic reset or destructive retry is not allowed.
+    success_msg: >-
+      Control plane state is safe for validation or join on
+      {{ inventory_hostname }}.
+
+# ------------------------------------------------------------
+# Temporary join credentials
+# ------------------------------------------------------------
+
+- name: Generate temporary certificate key
+  ansible.builtin.command:
+    cmd: kubeadm certs certificate-key
+  delegate_to: "{{ kubeadm_control_plane_join_source }}"
+  register: kubeadm_cp_join_certificate_key
+  when:
+    - not kubeadm_cp_join_admin_conf.stat.exists
+    - not ansible_check_mode
+  changed_when: false
+  no_log: true
+
+- name: Upload control plane certificates
+  ansible.builtin.command:
+    cmd: >-
+      kubeadm init phase upload-certs
+      --upload-certs
+      --certificate-key {{ kubeadm_cp_join_certificate_key.stdout }}
+  delegate_to: "{{ kubeadm_control_plane_join_source }}"
+  register: kubeadm_cp_join_upload_certs
+  when:
+    - not kubeadm_cp_join_admin_conf.stat.exists
+    - not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+- name: Generate temporary control plane join command
+  ansible.builtin.command:
+    cmd: >-
+      kubeadm token create
+      --ttl {{ kubeadm_control_plane_join_token_ttl }}
+      --print-join-command
+  delegate_to: "{{ kubeadm_control_plane_join_source }}"
+  register: kubeadm_cp_join_command
+  when:
+    - not kubeadm_cp_join_admin_conf.stat.exists
+    - not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+# ------------------------------------------------------------
+# Join
+# ------------------------------------------------------------
+
+- name: Join additional Kubernetes control plane
+  ansible.builtin.command:
+    cmd: >-
+      {{ kubeadm_cp_join_command.stdout }}
+      --control-plane
+      --certificate-key {{ kubeadm_cp_join_certificate_key.stdout }}
+  when:
+    - not kubeadm_cp_join_admin_conf.stat.exists
+    - not ansible_check_mode
+  register: kubeadm_cp_join_result
+  changed_when: kubeadm_cp_join_result.rc == 0
+  no_log: true
+
+# ------------------------------------------------------------
+# Kubelet state
+# ------------------------------------------------------------
+
+- name: Ensure kubelet is enabled and started
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+    state: started
+
+# ------------------------------------------------------------
+# Validation
+# ------------------------------------------------------------
+
+- name: Recheck control plane admin configuration
+  ansible.builtin.stat:
+    path: "{{ kubeadm_control_plane_join_admin_conf }}"
+  register: kubeadm_cp_join_admin_conf_after
+
+- name: Check control plane static pod manifests
+  ansible.builtin.stat:
+    path: "{{ kubeadm_control_plane_join_manifest_dir }}/{{ item }}"
+  loop:
+    - etcd.yaml
+    - kube-apiserver.yaml
+    - kube-controller-manager.yaml
+    - kube-scheduler.yaml
+  register: kubeadm_cp_join_static_manifests
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Check control plane node registration
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig=/etc/kubernetes/admin.conf
+      get node {{ inventory_hostname }}
+      -o json
+  delegate_to: "{{ kubeadm_control_plane_join_source }}"
+  register: kubeadm_cp_join_node_registration
+  changed_when: false
+  check_mode: false
+  retries: 12
+  delay: 5
+  until: kubeadm_cp_join_node_registration.rc == 0
+
+- name: Check stacked etcd member pod
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig=/etc/kubernetes/admin.conf
+      -n kube-system
+      get pod etcd-{{ inventory_hostname }}
+      -o jsonpath={.status.phase}
+  delegate_to: "{{ kubeadm_control_plane_join_source }}"
+  register: kubeadm_cp_join_etcd_phase
+  changed_when: false
+  check_mode: false
+  retries: 12
+  delay: 5
+  until: kubeadm_cp_join_etcd_phase.stdout == "Running"
+
+- name: Assert additional control plane bootstrap result
+  ansible.builtin.assert:
+    that:
+      - kubeadm_cp_join_admin_conf_after.stat.exists
+      - "'kubelet.service' in ansible_facts.services"
+      - ansible_facts.services['kubelet.service'].state == "running"
+      - >-
+        kubeadm_cp_join_static_manifests.results
+        | selectattr('stat.exists', 'equalto', false)
+        | list
+        | length == 0
+      - (kubeadm_cp_join_node_registration.stdout | from_json).metadata.name == inventory_hostname
+      - "'node-role.kubernetes.io/control-plane' in (kubeadm_cp_join_node_registration.stdout | from_json).metadata.labels"
+      - kubeadm_cp_join_etcd_phase.stdout == "Running"
+    fail_msg: >-
+      Kubernetes additional control plane validation failed on
+      {{ inventory_hostname }}.
+    success_msg: >-
+      Kubernetes additional control plane validation passed on
+      {{ inventory_hostname }}.

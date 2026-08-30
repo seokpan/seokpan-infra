@@ -10,6 +10,13 @@
   roles:
     - kubeadm_control_plane
 
+- name: Join additional Kubernetes control plane nodes
+  hosts: "control_planes:!cp-01"
+  gather_facts: true
+  serial: 1
+  roles:
+    - kubeadm_control_plane_join
+
 - name: Prepare Kubernetes worker nodes
   hosts: workers
   gather_facts: true
