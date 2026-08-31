@@ -2,7 +2,7 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: Bootstrap Kubernetes control plane and worker nodes
+# Purpose: Reproduce Kubernetes cluster, Calico network, and bootstrap add-ons
 
 - name: Prepare first Kubernetes control plane
   hosts: cp-01
@@ -23,3 +23,16 @@
   serial: 1
   roles:
     - kubeadm_worker
+
+- name: Install and validate Calico
+  hosts: cp-01
+  gather_facts: false
+  roles:
+    - calico
+
+- name: Bootstrap Kubernetes add-ons
+  hosts: cp-01
+  become: true
+  gather_facts: false
+  roles:
+    - k8s_addons
