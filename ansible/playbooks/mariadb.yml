@@ -5,7 +5,7 @@
 # Purpose: Install MariaDB server package (version pinned)
 
 - name: Install MariaDB server package
-  hosts: mariadb_master:mariadb_replica
+  hosts: mariadbs
   become: true
   gather_facts: true
 
