@@ -4,8 +4,16 @@
 # Project: 石나가는 판단
 # Purpose: mariadb role default variables
 
+# 06 문서 Version Lock 표(MariaDB Server 11.8.9 LTS) 반영.
+# CentOS Stream 9 AppStream은 11.8 계열을 제공하지 않으므로
+# MariaDB 공식 repo(mariadb_repo_setup)로 설치한다.
+# 공식 repo 패키지명은 AppStream과 달리 대문자 "MariaDB-" 접두사를 사용한다.
 mariadb_packages:
-  - "mariadb-server-{{ mariadb_version }}"
-  - "mariadb-backup-{{ mariadb_version }}"
+  - "MariaDB-server-{{ mariadb_version }}"
+  - "MariaDB-backup-{{ mariadb_version }}"
 
-mariadb_version: "10.5.29-5.el9"
+mariadb_version: "11.8.9-1.el9"
+
+# mariadb_repo_setup --mariadb-server-version 옵션에 사용하는 minor 버전
+mariadb_server_repo_version: "11.8"
+mariadb_repo_setup_url: "https://downloads.mariadb.com/MariaDB/mariadb_repo_setup"
