@@ -1,0 +1,8 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: nfs_server role entrypoint
+
+- name: Install nfs-utils package
+  ansible.builtin.import_tasks: install.yml

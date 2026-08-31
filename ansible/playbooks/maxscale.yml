@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: Install MaxScale package (version pinned)
+
+- name: Install MaxScale package
+  hosts: maxscale
+  become: true
+  gather_facts: true
+
+  roles:
+    - maxscale

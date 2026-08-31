@@ -1,0 +1,11 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: mariadb role default variables
+
+mariadb_packages:
+  - "mariadb-server-{{ mariadb_version }}"
+  - "mariadb-backup-{{ mariadb_version }}"
+
+mariadb_version: "10.5.29-5.el9"

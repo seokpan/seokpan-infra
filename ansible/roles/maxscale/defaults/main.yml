@@ -1,0 +1,15 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: maxscale role default variables
+
+maxscale_version: "23.08.13-1.rhel.9"
+maxscale_packages:
+  - "maxscale-{{ maxscale_version }}"
+
+# 실 서버(maxscale-01) history 확인 결과, 공식 mariadb_repo_setup 스크립트로
+# --mariadb-maxscale-version=23.08 옵션을 주고 등록한 상태.
+# (MaxScale은 MariaDB Corporation이 배포하는 제품이라 AppStream/baseos에 존재하지 않음)
+mariadb_maxscale_repo_version: "23.08"
+mariadb_repo_setup_url: "https://downloads.mariadb.com/MariaDB/mariadb_repo_setup"

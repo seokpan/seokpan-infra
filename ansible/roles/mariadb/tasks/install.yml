@@ -1,0 +1,10 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: MariaDB server package installation (version pinned, CentOS Stream AppStream)
+
+- name: Install pinned MariaDB packages
+  ansible.builtin.dnf:
+    name: "{{ mariadb_packages }}"
+    state: present
