@@ -44,11 +44,14 @@
   register: gateway_api_diff
   changed_when: false
   failed_when: gateway_api_diff.rc not in [0, 1]
+  check_mode: false
 
 - name: Apply Gateway API standard CRDs
   ansible.builtin.command:
     cmd: "kubectl apply -f {{ gateway_api_remote_manifest }}"
-  when: gateway_api_diff.rc == 1
+  when:
+    - gateway_api_diff.rc == 1
+    - not ansible_check_mode
   changed_when: true
 
 - name: Wait for GatewayClass CRD to be established
@@ -59,6 +62,7 @@
       crd/gatewayclasses.gateway.networking.k8s.io
       --timeout=120s
   changed_when: false
+  check_mode: false
 
 - name: Wait for Gateway CRD to be established
   ansible.builtin.command:
@@ -68,6 +72,7 @@
       crd/gateways.gateway.networking.k8s.io
       --timeout=120s
   changed_when: false
+  check_mode: false
 
 - name: Check NGINX Gateway Fabric CRD difference
   ansible.builtin.command:
@@ -75,11 +80,14 @@
   register: ngf_crds_diff
   changed_when: false
   failed_when: ngf_crds_diff.rc not in [0, 1]
+  check_mode: false
 
 - name: Apply NGINX Gateway Fabric CRDs
   ansible.builtin.command:
     cmd: "kubectl apply --server-side -f {{ ngf_crds_remote_manifest }}"
-  when: ngf_crds_diff.rc == 1
+  when:
+    - ngf_crds_diff.rc == 1
+    - not ansible_check_mode
   changed_when: true
 
 - name: Wait for NginxGateway CRD to be established
@@ -90,6 +98,7 @@
       crd/nginxgateways.gateway.nginx.org
       --timeout=120s
   changed_when: false
+  check_mode: false
 
 - name: Wait for NginxProxy CRD to be established
   ansible.builtin.command:
@@ -99,6 +108,7 @@
       crd/nginxproxies.gateway.nginx.org
       --timeout=120s
   changed_when: false
+  check_mode: false
 
 - name: Check NGINX Gateway Fabric controller difference
   ansible.builtin.command:
@@ -106,11 +116,14 @@
   register: ngf_controller_diff
   changed_when: false
   failed_when: ngf_controller_diff.rc not in [0, 1]
+  check_mode: false
 
 - name: Apply NGINX Gateway Fabric controller
   ansible.builtin.command:
     cmd: "kubectl apply -f {{ ngf_controller_remote_manifest }}"
-  when: ngf_controller_diff.rc == 1
+  when:
+    - ngf_controller_diff.rc == 1
+    - not ansible_check_mode
   changed_when: true
 
 - name: Wait for NGINX Gateway Fabric controller rollout
@@ -120,12 +133,14 @@
       -n nginx-gateway
       --timeout=180s
   changed_when: false
+  check_mode: false
 
 - name: Check GatewayClass nginx
   ansible.builtin.command:
     cmd: kubectl get gatewayclass nginx
   register: nginx_gatewayclass
   changed_when: false
+  check_mode: false
 
 - name: Check NGINX Gateway Fabric controller pods
   ansible.builtin.command:
@@ -136,6 +151,7 @@
       -o wide
   register: ngf_pods
   changed_when: false
+  check_mode: false
 
 - name: Show Gateway Add-on validation result
   ansible.builtin.debug:

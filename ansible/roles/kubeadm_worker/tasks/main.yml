@@ -82,6 +82,7 @@
   delegate_to: "{{ kubeadm_worker_join_source }}"
   register: kubeadm_worker_node_registration
   changed_when: false
+  check_mode: false
   retries: 12
   delay: 5
   until: kubeadm_worker_node_registration.rc == 0
