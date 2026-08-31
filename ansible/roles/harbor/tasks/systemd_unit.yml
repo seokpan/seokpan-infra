@@ -1,0 +1,45 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-08-31
+#
+# roles/harbor/tasks/systemd_unit.yml
+# tasks/main.yml의 17번(최종 상태 출력) 이후, harbor_project.yml 이전 정도 위치 권장
+# (설치 직후 바로 systemd로 관리되게 하기 위함)
+#
+# [배경] docker-compose의 개별 컨테이너 restart:always는 VM 재부팅 시
+# depends_on 순서를 지키지 않아 harbor-log를 제외한 나머지 컨테이너가
+# 전부 기동 실패(Exit 128)하는 문제가 실측 확인됨(2026-08-31).
+# docker compose up -d로 실행해야 의존성 순서가 지켜지므로, 이를 systemd로 감싼다.
+
+- name: Harbor systemd unit 파일 배포
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/harbor.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Harbor container platform
+      After=docker.service network-online.target
+      Requires=docker.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      WorkingDirectory={{ harbor_install_dir }}
+      ExecStart=/usr/bin/docker compose up -d
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=300
+
+      [Install]
+      WantedBy=multi-user.target
+  register: harbor_systemd_unit
+
+- name: systemd daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: harbor_systemd_unit.changed
+
+- name: harbor.service 활성화 및 기동
+  ansible.builtin.systemd:
+    name: harbor.service
+    enabled: true
+    state: started
