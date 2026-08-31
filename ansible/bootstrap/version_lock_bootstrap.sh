@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+
+# Owner: 이유빈
+# Scope: Ansible / Project Runtime / Version Lock
+# Project: 石나가는 판단
+# Purpose: Project Ansible runtime bootstrap and exact version validation
+# 최초 작성일: 2026-08-28 KST
+# 최종 수정일: 2026-08-31 KST
+
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,7 +16,7 @@ REQUIREMENTS_TXT="${PROJECT_ROOT}/requirements.txt"
 REQUIREMENTS_YML="${PROJECT_ROOT}/requirements.yml"
 
 # 아래 버전은 requirements.txt와 requirements.yml의 버전과 일치해야 합니다.
-REQUIRED_PYTHON_MAJOR_MINOR="3.12"
+REQUIRED_PYTHON_VERSION="3.12.13"
 REQUIRED_ANSIBLE_CORE="2.20.8"
 REQUIRED_KUBERNETES_CLIENT="36.0.3"
 REQUIRED_KUBERNETES_CORE="6.5.0"
@@ -22,22 +30,23 @@ echo "[1/8] Project root 확인"
 echo "PROJECT_ROOT=${PROJECT_ROOT}"
 echo
 
-echo "[2/8] Python ${REQUIRED_PYTHON_MAJOR_MINOR} 확인"
+echo "[2/8] Python ${REQUIRED_PYTHON_VERSION} 확인"
 
 if ! command -v python3.12 >/dev/null 2>&1; then
     echo "ERROR: python3.12 명령을 찾을 수 없습니다."
-    echo "Python 3.12를 설치한 후 다시 실행하세요."
+    echo "Python ${REQUIRED_PYTHON_VERSION}을 설치한 후 다시 실행하세요."
     exit 1
 fi
 
 PYTHON_VERSION="$(
     python3.12 \
-        -c 'import sys; print(".".join(map(str, sys.version_info[:2])))'
+        -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'
 )"
 
-if [[ "${PYTHON_VERSION}" != "${REQUIRED_PYTHON_MAJOR_MINOR}" ]]; then
-    echo "ERROR: Python ${REQUIRED_PYTHON_MAJOR_MINOR}.x가 필요합니다."
-    echo "현재 확인된 버전: ${PYTHON_VERSION}"
+if [[ "${PYTHON_VERSION}" != "${REQUIRED_PYTHON_VERSION}" ]]; then
+    echo "ERROR: Python 버전 불일치"
+    echo "필요: ${REQUIRED_PYTHON_VERSION}"
+    echo "실제: ${PYTHON_VERSION}"
     exit 1
 fi
 
@@ -75,12 +84,13 @@ fi
 
 VENV_PYTHON_VERSION="$(
     "${VENV_DIR}/bin/python" \
-        -c 'import sys; print(".".join(map(str, sys.version_info[:2])))'
+        -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'
 )"
 
-if [[ "${VENV_PYTHON_VERSION}" != "${REQUIRED_PYTHON_MAJOR_MINOR}" ]]; then
-    echo "ERROR: 기존 venv가 Python ${REQUIRED_PYTHON_MAJOR_MINOR}로 생성되지 않았습니다."
-    echo "venv Python 버전: ${VENV_PYTHON_VERSION}"
+if [[ "${VENV_PYTHON_VERSION}" != "${REQUIRED_PYTHON_VERSION}" ]]; then
+    echo "ERROR: 기존 venv의 Python 버전이 요구 버전과 일치하지 않습니다."
+    echo "필요: ${REQUIRED_PYTHON_VERSION}"
+    echo "실제: ${VENV_PYTHON_VERSION}"
     echo "기존 ${VENV_DIR}를 확인한 후 올바른 Python 버전으로 다시 생성하세요."
     exit 1
 fi
