@@ -1,0 +1,7 @@
+# playbooks/argocd_bootstrap_smoketest.yml
+---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - argocd_bootstrap

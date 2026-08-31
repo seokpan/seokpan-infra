@@ -14,23 +14,20 @@
 argocd_namespace: argocd
 argocd_version: "v3.4.7"
 
-# Release Manifest + Digest 고정 (version-lock.yml과 동일 값 유지)
 argocd_manifest_url: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
 argocd_manifest_local_path: "/tmp/argocd-install-{{ argocd_version }}.yaml"
-# version-lock.yml에 기록된 install.yaml SHA256 (freeze 절차 준수, 실측 후 채움)
 argocd_manifest_checksum: ""   # 예: "sha256:xxxxxxxx..."
 
-# 대형 CRD(client-side apply 시 annotation 262144 byte 한도 초과 이력) — 재검증 대상 목록
 argocd_large_crds:
   - applicationsets.argoproj.io
 
-# Server-Side Apply field manager 이름 (충돌 추적용)
 argocd_field_manager: "ansible-argocd-bootstrap"
 
-# kubectl/모듈 실행 컨텍스트 (cp-03 수동 검증과 동일 kubeconfig 기준)
-argocd_kubeconfig: "/etc/kubernetes/admin.conf"
+# 주의: /etc/kubernetes/admin.conf는 Control Plane 노드(cp-03) 경로다.
+# 모든 태스크는 delegate_to: localhost로 Ansible Controller에서 직접 실행되므로,
+# Controller 쪽에 복사해둔 kubeconfig 경로를 가리켜야 한다.
+argocd_kubeconfig: "~/.kube/seokpan-admin.conf"
 
-# Root Application(App-of-Apps)
 gitops_repo_url: "https://github.com/seokpan/seokpan-gitops.git"
 gitops_repo_revision: "main"
 gitops_root_path: "apps/root"
@@ -38,7 +35,6 @@ root_application_name: "root"
 root_application_namespace: "{{ argocd_namespace }}"
 root_application_project: "default"
 
-# 대기/재시도 정책 (초 단위)
 argocd_ready_retries: 30
 argocd_ready_delay: 10
 argocd_ready_timeout: "{{ argocd_ready_retries | int * argocd_ready_delay | int }}"

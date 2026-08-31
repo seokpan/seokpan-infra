@@ -3,44 +3,116 @@
 # 작성 날짜: 08/28
 #
 # Role: argocd_bootstrap
-# 목적: Argo CD v3.4.7 설치 + Root Application(App-of-Apps) 등록
-# 참고: 06_石나가는_판단_Ansible_자동화·테스트_설계 §6, §9.3 /
-#       11_MVP_구축·자동화_Runbook §7.2, §9, §13
+# 범위: Argo CD 자체 설치, Root Application(App-of-Apps) 등록
+# 소유권 경계: 설치 완료 후 Application Desired State는 Argo CD가 인수 (Ansible 재관리 X)
 #
-# 팀 requirements.yml/requirements.txt 확정(2026-08-27):
-#   ansible-core==2.20.8, python kubernetes==36.0.3, kubernetes.core==6.5.0
-#   → 본 Role은 kubectl command 우회 대신 kubernetes.core.k8s / k8s_info 모듈 사용
+# 모든 태스크에 delegate_to: localhost — argocd_kubeconfig가 Ansible Controller
+# 자체에 위치하므로, Controller에서 직접 kubernetes.core를 실행한다.
 
-argocd_namespace: argocd
-argocd_version: "v3.4.7"
+- name: Argo CD Namespace 존재 확인/생성 (멱등)
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ argocd_namespace }}"
+  delegate_to: localhost
+  become: false
 
-# Release Manifest + Digest 고정 (version-lock.yml과 동일 값 유지)
-argocd_manifest_url: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
-argocd_manifest_local_path: "/tmp/argocd-install-{{ argocd_version }}.yaml"
-# version-lock.yml에 기록된 install.yaml SHA256 (freeze 절차 준수, 실측 후 채움)
-argocd_manifest_checksum: ""   # 예: "sha256:xxxxxxxx..."
+- name: Argo CD Release Manifest 다운로드
+  ansible.builtin.get_url:
+    url: "{{ argocd_manifest_url }}"
+    dest: "{{ argocd_manifest_local_path }}"
+    checksum: "{{ argocd_manifest_checksum | default(omit) }}"
+    mode: "0644"
+    force: false
+  delegate_to: localhost
+  become: false
 
-# 대형 CRD(client-side apply 시 annotation 262144 byte 한도 초과 이력) — 재검증 대상 목록
-argocd_large_crds:
-  - applicationsets.argoproj.io
+- name: "Argo CD Manifest Server-Side Apply (대형 CRD annotation 한도 회피, 재검증 대상)"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    namespace: "{{ argocd_namespace }}"
+    src: "{{ argocd_manifest_local_path }}"
+    state: present
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+      force_conflicts: true
+  register: argocd_apply_result
+  delegate_to: localhost
+  become: false
 
-# Server-Side Apply field manager 이름 (충돌 추적용)
-argocd_field_manager: "ansible-argocd-bootstrap"
+- name: 대형 CRD 정상 생성 확인 (262144 byte 이슈 재검증)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ argocd_large_crds }}"
+  register: argocd_large_crd_check
+  failed_when: argocd_large_crd_check.resources | length == 0
+  delegate_to: localhost
+  become: false
 
-# kubectl/모듈 실행 컨텍스트 (cp-03 수동 검증과 동일 kubeconfig 기준)
-argocd_kubeconfig: "/etc/kubernetes/admin.conf"
+- name: Argo CD 핵심 Deployment Ready 대기
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    kind: Deployment
+    namespace: "{{ argocd_namespace }}"
+    name: "{{ item }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ argocd_ready_timeout }}"
+  loop:
+    - argocd-server
+    - argocd-repo-server
+    - argocd-applicationset-controller
+  delegate_to: localhost
+  become: false
 
-# Root Application(App-of-Apps)
-gitops_repo_url: "https://github.com/<org>/stone-judgment-gitops.git"
-gitops_repo_revision: "main"
-gitops_root_path: "apps/root"
-root_application_name: "root"
-root_application_namespace: "{{ argocd_namespace }}"
-root_application_project: "default"
+- name: Root Application Manifest 생성
+  ansible.builtin.template:
+    src: root-application.yaml.j2
+    dest: "/tmp/root-application-{{ argocd_namespace }}.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
 
-# 대기/재시도 정책 (초 단위)
-argocd_ready_retries: 30
-argocd_ready_delay: 10
-argocd_ready_timeout: "{{ argocd_ready_retries | int * argocd_ready_delay | int }}"
-root_app_sync_retries: 20
-root_app_sync_delay: 15
+- name: Root Application 등록/갱신
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    src: "/tmp/root-application-{{ argocd_namespace }}.yaml"
+    state: present
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+      force_conflicts: true
+  register: root_app_apply_result
+  delegate_to: localhost
+  become: false
+
+- name: Root Application Synced/Healthy 확인
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: "{{ root_application_name }}"
+    namespace: "{{ argocd_namespace }}"
+  register: root_app_info
+  until: >
+    (root_app_info.resources | length > 0) and
+    (root_app_info.resources[0].status.sync.status | default('')) == 'Synced' and
+    (root_app_info.resources[0].status.health.status | default('')) == 'Healthy'
+  retries: "{{ root_app_sync_retries }}"
+  delay: "{{ root_app_sync_delay }}"
+  delegate_to: localhost
+  become: false
+
+- name: Root Application 상태 출력 (Evidence 확인용)
+  ansible.builtin.debug:
+    msg: >-
+      root Application sync={{ root_app_info.resources[0].status.sync.status }}
+      health={{ root_app_info.resources[0].status.health.status }}

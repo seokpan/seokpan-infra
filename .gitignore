@@ -71,6 +71,7 @@ service-account*.json
 # ============================================================
 
 .ansible/
+.venv/
 *.retry
 *.retry.*
 
