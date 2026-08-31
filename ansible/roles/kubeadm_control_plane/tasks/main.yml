@@ -28,6 +28,7 @@
   ansible.builtin.command:
     cmd: "kubeadm config validate --config {{ kubeadm_config_file }}"
   changed_when: false
+  check_mode: false
 
 # ------------------------------------------------------------
 # Bootstrap state
@@ -78,12 +79,14 @@
   delay: 5
   until: kube_api_ready.rc == 0
   changed_when: false
+  check_mode: false
 
 - name: Check first control plane node registration
   ansible.builtin.command:
     cmd: kubectl --kubeconfig=/etc/kubernetes/admin.conf get node {{ inventory_hostname }} -o name
   register: control_plane_node
   changed_when: false
+  check_mode: false
 
 - name: Assert first control plane bootstrap result
   ansible.builtin.assert:
