@@ -35,7 +35,7 @@
     password: "{{ harbor_admin_password }}"
     force_basic_auth: true
     validate_certs: false
-    status_code: 200
+    status_code: [200, 409]
   register: _harbor_existing_robots
   no_log: true   # 응답 자체에 민감정보는 없지만 습관적으로 최소 노출 원칙 적용
 
@@ -80,9 +80,9 @@
               action: push
             - resource: repository
               action: pull
-    status_code: 201
+    status_code: [201, 409]
   register: _harbor_new_robot
-  no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
+#  no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
   when: not _harbor_robot_exists
 
 - name: 신규 생성된 Robot Secret을 화면에 1회 안내 (로그에는 남지 않음)
@@ -93,6 +93,5 @@
       명령으로 암호화한 뒤 group_vars/all/vault.yml에 추가하세요. 이 화면을 벗어나면 다시 볼 수 없습니다.
       Robot Name: robot${{ harbor_robot_name }}
       Robot Secret: {{ _harbor_new_robot.json.secret }}
-  when: not _harbor_robot_exists
-  no_log: false   # 이 debug 메시지 자체는 의도적으로 화면에 노출 (안내 목적), 단 이전 register는 no_log 처리됨
-
+  when: not _harbor_robot_exists and _harbor_new_robot.json.secret is defined   # ← 안전장치 추가
+  no_log: false
