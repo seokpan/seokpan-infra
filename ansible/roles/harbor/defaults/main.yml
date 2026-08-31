@@ -59,3 +59,7 @@ harbor_verify_signature: false
 # 빈 값이면 검증 task를 skip한다 (초기 구현 시 실제 값 채워 넣을 것).
 harbor_installer_sha256: ""
 
+# --- GC(Garbage Collection) 정책 ---
+# 매주 일요일 17:00 UTC(=KST 월요일 02:00) - Build/Push 트래픽이 뜸한 시간대로 팀 확인 필요
+harbor_gc_schedule_cron: "0 0 17 * * 0"
+harbor_gc_delete_untagged: true
