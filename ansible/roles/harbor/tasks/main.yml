@@ -357,4 +357,4 @@
 - include_tasks: harbor_project.yml
 - include_tasks: robot_account.yml
 - include_tasks: gc_policy.yml
-
+- include_tasks: systemd_unit.yml
