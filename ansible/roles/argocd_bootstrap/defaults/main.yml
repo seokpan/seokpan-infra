@@ -16,7 +16,7 @@ argocd_version: "v3.4.7"
 
 argocd_manifest_url: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
 argocd_manifest_local_path: "/tmp/argocd-install-{{ argocd_version }}.yaml"
-argocd_manifest_checksum: ""   # 예: "sha256:xxxxxxxx..."
+argocd_manifest_checksum: "sha256:11016889371e4b1e3754b7ba2494b36ab1111338bd2362d499abe3ff2f63c906"   # 예: "sha256:xxxxxxxx..."
 
 argocd_large_crds:
   - applicationsets.argoproj.io
