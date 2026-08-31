@@ -23,7 +23,7 @@
 - name: harbor-robot-dockerconfig Secret 적용 (BuildKit rootless Agent Pod가 마운트)
   ansible.builtin.shell: |
     kubectl create secret docker-registry harbor-robot-dockerconfig \
-      --namespace=jenkins \
+      --namespace=cicd \
       --docker-server={{ hostvars['harbor'].harbor_hostname }} \
       --docker-username="robot${{ hostvars['harbor'].harbor_robot_name }}" \
       --docker-password="{{ vault_harbor_robot_secret }}" \
@@ -35,7 +35,7 @@
 - name: jenkins-harbor-credential Secret 적용 (JCasC 환경변수 치환용, Jenkins Credential Store 바인딩)
   ansible.builtin.shell: |
     kubectl create secret generic jenkins-harbor-credential \
-      --namespace=jenkins \
+      --namespace=cicd \
       --from-literal=username="robot${{ hostvars['harbor'].harbor_robot_name }}" \
       --from-literal=password="{{ vault_harbor_robot_secret }}" \
       --dry-run=client -o yaml | kubectl apply -f -
