@@ -2,20 +2,10 @@
 # Owner: 김상희
 # Scope: Data, Storage & Recovery
 # Project: 石나가는 판단
-# Purpose: nfs-server 서비스 활성화·기동 및 Export 상태 확인
+# Purpose: nfs-server 서비스 활성화 및 기동
 
 - name: nfs-server 서비스 enable/start
   ansible.builtin.systemd:
     name: "{{ nfs_server_service_name }}"
     enabled: true
     state: started
-
-- name: 현재 Export 상태 확인 (exportfs -v)
-  ansible.builtin.command:
-    cmd: exportfs -v
-  register: nfs_server_exportfs_status
-  changed_when: false
-
-- name: Export 상태 출력 (Evidence용)
-  ansible.builtin.debug:
-    var: nfs_server_exportfs_status.stdout_lines
