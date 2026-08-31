@@ -1,0 +1,24 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: MariaDB 공식 repo 설정 스크립트로 mariadb-main repo 등록 (idempotent)
+
+- name: mariadb-main repo 활성 여부 확인
+  ansible.builtin.command:
+    cmd: dnf repolist enabled mariadb-main
+  register: mariadb_repo_check
+  changed_when: false
+  failed_when: false
+
+- name: MariaDB 공식 repo 설정 스크립트 다운로드
+  ansible.builtin.get_url:
+    url: "{{ mariadb_repo_setup_url }}"
+    dest: /tmp/mariadb_repo_setup
+    mode: "0755"
+  when: "'mariadb-main' not in mariadb_repo_check.stdout"
+
+- name: MariaDB 서버 repo 등록 (공식 스크립트 실행)
+  ansible.builtin.command:
+    cmd: "/tmp/mariadb_repo_setup --mariadb-server-version={{ mariadb_server_repo_version }}"
+  when: "'mariadb-main' not in mariadb_repo_check.stdout"
