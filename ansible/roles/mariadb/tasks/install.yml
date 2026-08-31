@@ -2,9 +2,14 @@
 # Owner: 김상희
 # Scope: Data, Storage & Recovery
 # Project: 石나가는 판단
-# Purpose: MariaDB server package installation (version pinned, CentOS Stream AppStream)
+# Purpose: MariaDB server package installation (version pinned, MariaDB 공식 repo)
 
+# AppStream mariadb-server에 딸려있던 mariadb-gssapi-server(GSSAPI 인증 플러그인)가
+# 구버전 mariadb-server를 계속 요구해 depsolve 충돌 발생 (실서버 테스트로 확인, #63).
+# 이 프로젝트는 GSSAPI 인증을 사용하지 않으므로 allowerasing으로 충돌 패키지를
+# 함께 제거하고 공식 repo 패키지로 교체한다.
 - name: Install pinned MariaDB packages
   ansible.builtin.dnf:
     name: "{{ mariadb_packages }}"
     state: present
+    allowerasing: true
