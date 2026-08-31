@@ -4,19 +4,21 @@
 # Project: 石나가는 판단
 # Purpose: MariaDB 공식 repo 설정 스크립트로 mariadb-maxscale repo 등록 (idempotent)
 
-- name: mariadb.repo 존재 여부 확인
-  ansible.builtin.stat:
-    path: "{{ mariadb_repo_file }}"
-  register: mariadb_repo_stat
+- name: mariadb-maxscale repo 활성 여부 확인
+  ansible.builtin.command:
+    cmd: dnf repolist enabled mariadb-maxscale
+  register: maxscale_repo_check
+  changed_when: false
+  failed_when: false
 
 - name: MariaDB 공식 repo 설정 스크립트 다운로드
   ansible.builtin.get_url:
     url: "{{ mariadb_repo_setup_url }}"
     dest: /tmp/mariadb_repo_setup
     mode: "0755"
-  when: not mariadb_repo_stat.stat.exists
+  when: "'mariadb-maxscale' not in maxscale_repo_check.stdout"
 
 - name: MariaDB/MaxScale repo 등록 (공식 스크립트 실행)
   ansible.builtin.command:
     cmd: "/tmp/mariadb_repo_setup --mariadb-maxscale-version={{ mariadb_maxscale_repo_version }}"
-  when: not mariadb_repo_stat.stat.exists
+  when: "'mariadb-maxscale' not in maxscale_repo_check.stdout"

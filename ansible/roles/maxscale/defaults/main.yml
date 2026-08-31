@@ -13,4 +13,3 @@ maxscale_packages:
 # (MaxScale은 MariaDB Corporation이 배포하는 제품이라 AppStream/baseos에 존재하지 않음)
 mariadb_maxscale_repo_version: "23.08"
 mariadb_repo_setup_url: "https://downloads.mariadb.com/MariaDB/mariadb_repo_setup"
-mariadb_repo_file: /etc/yum.repos.d/mariadb.repo
