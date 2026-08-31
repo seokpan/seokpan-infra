@@ -1,5 +1,19 @@
 ---
 # ============================================================
+# 기존 Harbor Host 매핑 정리
+# ============================================================
+
+- name: Remove legacy Harbor host mappings
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "{{ item }}"
+    state: absent
+  loop:
+    - '^192\.168\.53\.61\s+harbor\.stone\.test\s+harbor\s*$'
+    - '^192\.168\.53\.61\s+harbor\.seokpan\.soldesk\.store\s*$'
+
+
+# ============================================================
 # /etc/hosts에 프로젝트용 고정 Alias 등록
 # ============================================================
 
