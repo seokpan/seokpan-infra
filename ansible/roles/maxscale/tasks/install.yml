@@ -1,0 +1,11 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: MaxScale package installation (version pinned, mariadb-maxscale repo)
+
+- name: Install pinned MaxScale package
+  ansible.builtin.dnf:
+    name: "{{ maxscale_packages }}"
+    state: present
+    
