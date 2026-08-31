@@ -4,8 +4,13 @@
 # Project: 石나가는 판단
 # Purpose: maxscale role default variables
 
-# 06 문서 Version Lock 표(MaxScale 24.02.10, MariaDB 11.8 호환) 반영
-maxscale_version: "24.02.10-1.rhel.9"
+# 06 문서 목표는 24.02.10이나, 실서버(maxscale-01) 확인 결과
+# 커뮤니티 무료 repo(mariadb-maxscale)에는 24.02.9까지만 제공됨을 확인
+# (dnf clean all && dnf makecache로 캐시 완전 갱신 후 재확인 완료).
+# 24.02.10은 공식 GA(2026-06-15)로 실존하나 무료 채널엔 미배포 —
+# 호환성 검증(06 문서 기준 시리즈 단위 호환, 24.02.10 버그 수정 17건 전수 확인)
+# 결과 이 프로젝트 사용 기능에 영향 없음 확인 후 24.02.9로 팀 확정 (#63, 2026-08-31).
+maxscale_version: "24.02.9-1.rhel.9"
 maxscale_packages:
   - "maxscale-{{ maxscale_version }}"
 
