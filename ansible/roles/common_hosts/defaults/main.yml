@@ -59,7 +59,7 @@ common_host_entries:
     alias: ms1
 
   - ip: 192.168.53.61
-    alias: hb
+    alias: harbor.seokpan.soldesk.store harbor hb
 
   - ip: 10.1.93.78
     alias: lb1
