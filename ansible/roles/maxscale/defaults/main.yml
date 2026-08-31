@@ -4,12 +4,18 @@
 # Project: 石나가는 판단
 # Purpose: maxscale role default variables
 
-maxscale_version: "23.08.13-1.rhel.9"
+# 06 문서 목표는 24.02.10이나, 실서버(maxscale-01) 확인 결과
+# 커뮤니티 무료 repo(mariadb-maxscale)에는 24.02.9까지만 제공됨을 확인
+# (dnf clean all && dnf makecache로 캐시 완전 갱신 후 재확인 완료).
+# 24.02.10은 공식 GA(2026-06-15)로 실존하나 무료 채널엔 미배포 —
+# 호환성 검증(06 문서 기준 시리즈 단위 호환, 24.02.10 버그 수정 17건 전수 확인)
+# 결과 이 프로젝트 사용 기능에 영향 없음 확인 후 24.02.9로 팀 확정 (#63, 2026-08-31).
+maxscale_version: "24.02.9-1.rhel.9"
 maxscale_packages:
   - "maxscale-{{ maxscale_version }}"
 
 # 실 서버(maxscale-01) history 확인 결과, 공식 mariadb_repo_setup 스크립트로
-# --mariadb-maxscale-version=23.08 옵션을 주고 등록한 상태.
+# --mariadb-maxscale-version 옵션을 주고 등록하는 방식.
 # (MaxScale은 MariaDB Corporation이 배포하는 제품이라 AppStream/baseos에 존재하지 않음)
-mariadb_maxscale_repo_version: "23.08"
+mariadb_maxscale_repo_version: "24.02"
 mariadb_repo_setup_url: "https://downloads.mariadb.com/MariaDB/mariadb_repo_setup"
