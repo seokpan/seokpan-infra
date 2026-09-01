@@ -128,25 +128,15 @@
 # Secret으로 배포. BuildKit Rootless Agent Pod가 Harbor TLS를 신뢰하기 위한 용도.
 # ca.key는 절대 이 Task에서 다루지 않음 - internal_ca_dir 최유준(cyj) 단독 소유 원칙 유지.
 
-- name: cicd Namespace에 Harbor CA Secret 존재 확인
-  kubernetes.core.k8s_info:
-    kind: Secret
-    name: harbor-ca-cert
-    namespace: cicd
-    kubeconfig: "{{ cluster_kubeconfig }}"
-  register: harbor_ca_secret_check
-
-- name: Harbor CA Secret 생성 (BuildKit Agent Trust Store용, cicd)
+- name: cicd Namespace에 Harbor CA ConfigMap 적용
   kubernetes.core.k8s:
     state: present
-    kubeconfig: "{{ cluster_kubeconfig }}" 
+    kubeconfig: "{{ cluster_kubeconfig }}"
     definition:
       apiVersion: v1
-      kind: Secret
+      kind: ConfigMap
       metadata:
         name: harbor-ca-cert
         namespace: cicd
-      type: Opaque
       data:
-        ca.crt: "{{ lookup('file', internal_ca_cert_path) | b64encode }}"
-  when: harbor_ca_secret_check.resources | length == 0
+        ca.crt: "{{ lookup('file', internal_ca_cert_path) }}"

@@ -23,10 +23,10 @@ argocd_large_crds:
 
 argocd_field_manager: "ansible-argocd-bootstrap"
 
-# 주의: /etc/kubernetes/admin.conf는 Control Plane 노드(cp-03) 경로다.
-# 모든 태스크는 delegate_to: localhost로 Ansible Controller에서 직접 실행되므로,
-# Controller 쪽에 복사해둔 kubeconfig 경로를 가리켜야 한다.
-# [변경, 2026-09-01] 값을 공용 변수 cluster_kubeconfig로 위임.
+
+# Controller에서 실행되는 Kubernetes API 작업용 kubeconfig.
+# Control Plane의 /etc/kubernetes/admin.conf와 별도로 관리한다.
+# 프로젝트 공용 경로는 cluster_kubeconfig에서 정의한다.
 argocd_kubeconfig: "{{ cluster_kubeconfig }}"
 
 gitops_repo_url: "https://github.com/seokpan/seokpan-gitops.git"
