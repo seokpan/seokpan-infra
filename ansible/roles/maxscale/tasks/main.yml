@@ -9,3 +9,6 @@
 
 - name: Install MaxScale packages
   ansible.builtin.import_tasks: install.yml
+
+- name: Deploy MaxScale configuration
+  ansible.builtin.import_tasks: configure.yml

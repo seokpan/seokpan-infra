@@ -1,0 +1,4 @@
+---
+# Owner: 김상희
+mariadb_server_id: 2
+mariadb_gtid_domain_id: 2

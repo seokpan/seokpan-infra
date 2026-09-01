@@ -1,0 +1,5 @@
+---
+# Owner: 김상희
+# Purpose: mariadb-01 고유 식별자 (auto_failover 환경에서도 서버별로 고정되는 값)
+mariadb_server_id: 1
+mariadb_gtid_domain_id: 1
