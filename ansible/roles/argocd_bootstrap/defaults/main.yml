@@ -25,8 +25,8 @@ argocd_field_manager: "ansible-argocd-bootstrap"
 
 # 주의: /etc/kubernetes/admin.conf는 Control Plane 노드(cp-03) 경로다.
 # 모든 태스크는 delegate_to: localhost로 Ansible Controller에서 직접 실행되므로,
-# Controller 쪽에 복사해둔 kubeconfig 경로를 가리켜야 한다.
-argocd_kubeconfig: "~/.kube/seokpan-admin.conf"
+# Controller 실행 계정의 HOME 아래에 복사해둔 kubeconfig 경로를 가리켜야 한다.
+argocd_kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/seokpan-admin.conf"
 
 gitops_repo_url: "https://github.com/seokpan/seokpan-gitops.git"
 gitops_repo_revision: "main"
