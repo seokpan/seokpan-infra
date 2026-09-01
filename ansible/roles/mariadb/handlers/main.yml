@@ -1,0 +1,6 @@
+---
+# Owner: 김상희
+- name: restart mariadb
+  ansible.builtin.systemd:
+    name: mariadb
+    state: restarted
