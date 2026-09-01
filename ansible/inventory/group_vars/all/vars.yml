@@ -5,4 +5,4 @@
 # registry 그룹의 vars.yml(harbor_project_name 등)과 동일한 패턴 - 평문 값,
 # 암호화 대상은 group_vars/all/vault.yml로 분리 유지.
 
-cluster_kubeconfig: "~/.kube/seokpan-admin.conf"
+cluster_kubeconfig: "/home/cyj/.kube/seokpan-admin.conf"

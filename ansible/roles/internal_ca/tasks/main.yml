@@ -133,11 +133,13 @@
     kind: Secret
     name: harbor-ca-cert
     namespace: cicd
+    kubeconfig: "{{ cluster_kubeconfig }}"
   register: harbor_ca_secret_check
 
 - name: Harbor CA Secret 생성 (BuildKit Agent Trust Store용, cicd)
   kubernetes.core.k8s:
     state: present
+    kubeconfig: "{{ cluster_kubeconfig }}" 
     definition:
       apiVersion: v1
       kind: Secret
