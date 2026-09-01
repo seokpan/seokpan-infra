@@ -58,6 +58,9 @@ id_dsa.*
 kubeconfig
 kubeconfig.*
 *kubeconfig*
+!playbooks/controller_kubeconfig.yml
+!roles/controller_kubeconfig/
+!roles/controller_kubeconfig/**
 
 # Cloud / API credential files
 .aws/
