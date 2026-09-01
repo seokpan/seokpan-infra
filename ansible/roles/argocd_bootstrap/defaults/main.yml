@@ -30,7 +30,7 @@ argocd_kubeconfig: "~/.kube/seokpan-admin.conf"
 
 gitops_repo_url: "https://github.com/seokpan/seokpan-gitops.git"
 gitops_repo_revision: "main"
-gitops_root_path: "apps/root"
+gitops_root_path: "argocd/applications"
 root_application_name: "root"
 root_application_namespace: "{{ argocd_namespace }}"
 root_application_project: "default"
