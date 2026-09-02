@@ -8,14 +8,21 @@
 # 이미 다른 버전으로 등록된 상태에서 재등록(버전 전환)이 필요할 때 skip되어
 # 버전이 그대로 남는 문제가 있음. [mariadb-main] 섹션 안에 목표 버전 문자열이
 # 실제로 들어있는지까지 확인하도록 처음부터 반영.
+#
+# 이슈 #105: 기존 awk range 패턴(/start/,/end/)은 시작 패턴이 매치된 줄
+# 자체가 종료 패턴(/^\[/)에도 즉시 매치되어 헤더 한 줄만 추출하는 버그가
+# 있었음 (baseurl 등 실제 버전이 적힌 줄이 range에서 빠짐 → 항상 미탐지).
+# flag 변수 방식으로 교체해 헤더 다음 줄부터 다음 섹션 전까지 정확히 추출.
 - name: mariadb-main repo가 목표 버전으로 등록되어 있는지 확인
   ansible.builtin.shell:
     cmd: >
-      awk '/^\[mariadb-main\]/,/^\[/' /etc/yum.repos.d/mariadb.repo
+      awk '/^\[mariadb-main\]/{flag=1; next} /^\[/{flag=0} flag'
+      /etc/yum.repos.d/mariadb.repo
       | grep -q "{{ mariadb_server_repo_version }}"
   register: mariadb_repo_check
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: MariaDB 공식 repo 설정 스크립트 다운로드
   ansible.builtin.get_url:
