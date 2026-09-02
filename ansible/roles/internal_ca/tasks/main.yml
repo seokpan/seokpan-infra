@@ -120,3 +120,23 @@
       - "Root CA Key  = {{ internal_ca_key_path }} (Controller 밖으로 절대 반출 금지)"
       - "CN = {{ internal_ca_common_name }}"
       - "유효기간 = {{ internal_ca_days }}일"
+
+# 작성자: 최유준
+# 작성 날짜: 2026-09-01
+#
+# [연동] 위에서 생성된 ca.crt(공개 인증서만, ca.key 아님)를 cicd Namespace의
+# Secret으로 배포. BuildKit Rootless Agent Pod가 Harbor TLS를 신뢰하기 위한 용도.
+# ca.key는 절대 이 Task에서 다루지 않음 - internal_ca_dir 최유준(cyj) 단독 소유 원칙 유지.
+
+- name: cicd Namespace에 Harbor CA ConfigMap 적용
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: harbor-ca-cert
+        namespace: cicd
+      data:
+        ca.crt: "{{ lookup('file', internal_ca_cert_path) }}"

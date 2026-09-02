@@ -1,0 +1,8 @@
+---
+controller_kubeconfig_group: "ansible-kube"
+controller_kubeconfig_path: "{{ cluster_kubeconfig }}"
+
+
+# Kubernetes 최초 Control Plane에서 admin.conf를 가져온다.
+controller_kubeconfig_source_host: "cp-01"
+controller_kubeconfig_source_path: "/etc/kubernetes/admin.conf"
