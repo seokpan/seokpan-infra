@@ -1,0 +1,22 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: mariadb_account role default variables (이슈 #91)
+
+# 계정/DCL 작업은 항상 실제 Master에서만 수행 (E_infra_snapshot.md 2절)
+mariadb_master_delegate_host: maxscale-01
+stone_game_db: stone_game
+
+# RHEL 계열 MariaDB 공식 repo 패키지 기준 기본 소켓 경로.
+# 실제 경로가 다르면 --check --diff 전에 아래 값을 override할 것.
+mariadb_socket_path: /var/lib/mysql/mysql.sock
+
+# stone_game_account_split.sql / E_infra_snapshot.md 6절 실측 그대로 반영
+identity_svc_priv: "stone_game.member:SELECT,INSERT,UPDATE,DELETE"
+
+game_svc_priv: >-
+  stone_game.game:SELECT,INSERT,UPDATE,DELETE/stone_game.game_participant:SELECT,INSERT,UPDATE,DELETE/stone_game.move:SELECT,INSERT,UPDATE,DELETE/stone_game.game_result:SELECT,INSERT,UPDATE,DELETE/stone_game.rating_history:SELECT,INSERT,UPDATE,DELETE/stone_game.member_stats:SELECT,INSERT,UPDATE,DELETE
+
+db_admin_priv: >-
+  *.*:BINLOG MONITOR,SLAVE MONITOR/stone_game.*:SELECT,INSERT,UPDATE,DELETE,CREATE,DROP,REFERENCES,INDEX,ALTER,CREATE VIEW

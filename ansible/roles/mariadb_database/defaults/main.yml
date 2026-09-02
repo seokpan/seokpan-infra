@@ -1,0 +1,18 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: mariadb_database role default variables (이슈 #89)
+
+# DDL 작업은 항상 실제 Master에서만 수행 (E_infra_snapshot.md 2절)
+mariadb_master_delegate_host: maxscale-01
+
+# RHEL 계열 MariaDB 공식 repo 패키지 기준 기본 소켓 경로.
+# 실제 경로가 다르면 --check --diff 전에 아래 값을 override할 것.
+mariadb_socket_path: /var/lib/mysql/mysql.sock
+
+# stone_game_schema_v1.sql 기준(CREATE DATABASE IF NOT EXISTS stone_game
+# CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci)
+stone_game_db: stone_game
+stone_game_db_encoding: utf8mb4
+stone_game_db_collation: utf8mb4_unicode_ci

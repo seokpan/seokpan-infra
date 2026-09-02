@@ -36,6 +36,7 @@
         | dict2items
         | selectattr('value', 'mapping')
         | selectattr('value.ipv4', 'defined')
+        | selectattr('value.ipv4', 'mapping')
         | selectattr(
             'value.ipv4.address',
             'match',
@@ -59,6 +60,7 @@
         | dict2items
         | selectattr('value', 'mapping')
         | selectattr('value.ipv4', 'defined')
+        | selectattr('value.ipv4', 'mapping')
         | selectattr(
             'value.ipv4.address',
             'equalto',
@@ -135,7 +137,7 @@
       - "{{ external_interface }}"
   register: external_connection_result
   changed_when: false
-
+  check_mode: false
 
 - name: Verify external NetworkManager connection
   ansible.builtin.assert:
@@ -187,7 +189,7 @@
       - net.ipv4.ip_forward
   register: ip_forward_before
   changed_when: false
-
+  check_mode: false
 
 # ============================================================
 # 6. IPv4 Forwarding Runtime 적용
@@ -214,6 +216,7 @@
       - net.ipv4.ip_forward
   register: ip_forward_after
   changed_when: false
+  check_mode: false
 
 
 - name: Verify IPv4 forwarding
@@ -225,6 +228,7 @@
       expected={{ ipv4_forwarding }}
       actual={{ ip_forward_after.stdout | trim }}
     success_msg: "IPv4 forwarding is enabled."
+  when: not ansible_check_mode
 
 
 # ============================================================
@@ -244,7 +248,7 @@
   register: runtime_route_checks
   changed_when: false
   failed_when: false
-
+  check_mode: false
 
 # ============================================================
 # 9. Runtime Static Route 적용
@@ -297,6 +301,7 @@
       - "{{ external_connection }}"
   register: current_persistent_routes
   changed_when: false
+  check_mode: false
 
 
 # ============================================================
@@ -331,6 +336,7 @@
       - route
   register: routing_table
   changed_when: false
+  check_mode: false
 
 
 - name: Show routing table
@@ -354,6 +360,7 @@
     label: "{{ item.network }}"
   register: configured_runtime_routes
   changed_when: false
+  check_mode: false
 
 
 # ============================================================
@@ -379,6 +386,7 @@
   loop: "{{ configured_runtime_routes.results }}"
   loop_control:
     label: "{{ item.item.network }} via {{ item.item.gateway }}"
+  when: not ansible_check_mode
 
 
 # ============================================================
@@ -396,6 +404,7 @@
       - "{{ external_connection }}"
   register: persistent_routes_after
   changed_when: false
+  check_mode: false
 
 
 - name: Show persistent routes
@@ -423,6 +432,7 @@
   loop: "{{ static_routes }}"
   loop_control:
     label: "{{ item.network }} via {{ item.gateway }}"
+  when: not ansible_check_mode
 
 
 # ============================================================
