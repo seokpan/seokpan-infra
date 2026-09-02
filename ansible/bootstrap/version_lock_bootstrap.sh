@@ -20,7 +20,6 @@ REQUIRED_PYTHON_VERSION="3.12.13"
 REQUIRED_ANSIBLE_CORE="2.20.8"
 REQUIRED_KUBERNETES_CLIENT="36.0.3"
 REQUIRED_KUBERNETES_CORE="6.5.0"
-REQUIRED_MARIADB_COLLECTION="6.0.2"
 
 echo "============================================================"
 echo " Ansible Project Runtime Bootstrap"
@@ -140,26 +139,14 @@ ACTUAL_KUBERNETES_CORE="$(
         awk '$1 == "kubernetes.core" {print $2}'
 )"
 
-ACTUAL_MARIADB_COLLECTION="$(
-    "${VENV_DIR}/bin/ansible-galaxy" collection list \
-        --collections-path "${COLLECTION_DIR}" |
-        awk '$1 == "ansible.mariadb" {print $2}'
-)"
-
 if [[ -z "${ACTUAL_KUBERNETES_CORE}" ]]; then
     echo "ERROR: kubernetes.core Collection을 찾을 수 없습니다."
-    exit 1
-fi
-
-if [[ -z "${ACTUAL_MARIADB_COLLECTION}" ]]; then
-    echo "ERROR: ansible.mariadb Collection을 찾을 수 없습니다."
     exit 1
 fi
 
 echo "ansible-core: ${ACTUAL_ANSIBLE_CORE}"
 echo "kubernetes client: ${ACTUAL_KUBERNETES_CLIENT}"
 echo "kubernetes.core: ${ACTUAL_KUBERNETES_CORE}"
-echo "ansible.mariadb: ${ACTUAL_MARIADB_COLLECTION}"
 echo
 
 if [[ "${ACTUAL_ANSIBLE_CORE}" != "${REQUIRED_ANSIBLE_CORE}" ]]; then
@@ -180,13 +167,6 @@ if [[ "${ACTUAL_KUBERNETES_CORE}" != "${REQUIRED_KUBERNETES_CORE}" ]]; then
     echo "ERROR: kubernetes.core 버전 불일치"
     echo "필요: ${REQUIRED_KUBERNETES_CORE}"
     echo "실제: ${ACTUAL_KUBERNETES_CORE}"
-    exit 1
-fi
-
-if [[ "${ACTUAL_MARIADB_COLLECTION}" != "${REQUIRED_MARIADB_COLLECTION}" ]]; then
-    echo "ERROR: ansible.mariadb 버전 불일치"
-    echo "필요: ${REQUIRED_MARIADB_COLLECTION}"
-    echo "실제: ${ACTUAL_MARIADB_COLLECTION}"
     exit 1
 fi
 
