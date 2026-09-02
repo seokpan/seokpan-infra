@@ -1,0 +1,42 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: maxctrl로 실제 Master를 매번 재확인 후 mariadbs 그룹에 공유
+#          (문서 기준 배치와 실제가 다를 수 있음 — E_infra_snapshot.md 2절)
+#          mariadb_account role의 동일 태스크와 로직 동일 — role 간 의존을
+#          만들지 않기 위해 의도적으로 각 role에 독립 보유
+
+- name: maxctrl list servers 조회 (maxscale-01에 위임)
+  ansible.builtin.command: maxctrl --tsv list servers
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: maxctrl_result
+
+- name: State 컬럼에 Master가 포함된 서버명 추출
+  ansible.builtin.set_fact:
+    mariadb_master_candidates: >-
+      {{ maxctrl_result.stdout_lines
+         | select('search', 'Master')
+         | map('regex_replace', '^([^\t]+)\t.*$', '\1')
+         | list }}
+  run_once: true
+
+- name: Master가 정확히 1개인지 검증
+  ansible.builtin.assert:
+    that:
+      - mariadb_master_candidates | length == 1
+    fail_msg: >-
+      Master 서버가 0개 또는 여러 개로 조회되었습니다: {{ mariadb_master_candidates }}
+      (maxctrl list servers 원본 출력을 직접 확인할 것)
+  run_once: true
+
+- name: Master 호스트명을 mariadbs 그룹 전체 호스트에 공유
+  ansible.builtin.set_fact:
+    mariadb_master_inventory_hostname: "{{ mariadb_master_candidates[0] }}"
+  delegate_to: "{{ item }}"
+  delegate_facts: true
+  loop: "{{ groups['mariadbs'] }}"
+  run_once: true

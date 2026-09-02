@@ -1,0 +1,19 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: stone_game 데이터베이스 생성 (이슈 #89)
+#          - 실제 Master에서만 실행 (Replica 직접 조작 시 binlog replay 충돌 위험)
+#          - CREATE DATABASE IF NOT EXISTS와 동등한 멱등 동작 (state: present)
+#          - 테이블 생성/변경은 담당 범위 밖(Backend Alembic Migration이 유일한
+#            기준 — 이슈 #89 코멘트, 정태훈). 이 role은 DB 자체만 생성한다.
+
+- name: stone_game 데이터베이스 생성
+  ansible.mariadb.mariadb_db:
+    name: "{{ stone_game_db }}"
+    encoding: "{{ stone_game_db_encoding }}"
+    collation: "{{ stone_game_db_collation }}"
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
