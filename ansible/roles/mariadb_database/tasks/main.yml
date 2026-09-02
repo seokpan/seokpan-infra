@@ -1,0 +1,16 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: mariadb_database role entrypoint (이슈 #89)
+
+- name: ansible.mariadb 모듈 요구사항(PyMySQL) 설치
+  ansible.builtin.dnf:
+    name: python3-PyMySQL
+    state: present
+
+- name: 실제 Master 서버 판별
+  ansible.builtin.import_tasks: detect_master.yml
+
+- name: stone_game 데이터베이스 생성
+  ansible.builtin.import_tasks: database.yml
