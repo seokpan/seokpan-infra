@@ -1,14 +1,15 @@
 # 작성자: 최유준
 # 작성 날짜: 2026-08-28
 #
-# [위치] robot_account.yml보다 먼저 include 되어야 함 (harbor/tasks/main.yml에서 순서 주의).
+# [위치] immutability.yml 및 robot_account.yml보다 먼저 include 되어야 함
+# (harbor/tasks/main.yml에서 순서 주의).
+#
 # [근거] 06 문서: Project 생성(Private) + Tag Immutability 적용.
 # 11 Runbook 자동화 범위 표에도 "Harbor 설치·Project·Robot Account·GC | Ansible(harbor Role)"로
-# Project 생성이 이미 harbor role 책임 범위에 포함되어 있었음 (지금까지 미구현 상태였던 것).
+# Project 생성이 harbor role 책임 범위에 포함되어 있음.
 #
-# [TODO - 이번 단계 범위 밖] Tag Immutability 규칙은 Harbor Retention/Immutability API 호출이
-# 별도로 필요하고 정확한 Rule Scope Selector 형식 확인이 필요해서 이 파일에는 포함하지 않았습니다.
-# Project 생성 + Private 설정까지만 이번에 처리하고, Tag Immutability는 별도 후속 작업으로 남겨둡니다.
+# Project 생성/Private 설정은 이 파일에서 담당하고,
+# Tag Immutability는 별도 immutability.yml에서 Project ID 조회 후 적용한다.
 
 - name: Harbor Project(seokpan) 존재 여부 확인
   ansible.builtin.uri:
@@ -50,5 +51,5 @@
     msg: >-
       Harbor Project '{{ harbor_project_name }}'
       {{ '이미 존재함, 생성 건너뜀' if _harbor_project_exists else '신규 생성 완료' }}.
-      Tag Immutability 규칙은 이 Task 범위 밖 — 별도 확인/적용 필요.
+      Tag Immutability는 다음 immutability.yml 단계에서 확인/적용합니다.
 
