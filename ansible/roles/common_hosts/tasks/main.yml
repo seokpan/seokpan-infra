@@ -14,17 +14,61 @@
 
 
 # ============================================================
-# /etc/hosts에 프로젝트용 고정 Alias 등록
+# 운영 Alias + 공식 Endpoint 렌더링
+# - Jinja trim/lstrip 설정과 무관하게 line list를 만든 뒤 join('\n')한다.
 # ============================================================
 
-- name: Configure project host aliases
+- name: Initialize project host line list
+  ansible.builtin.set_fact:
+    common_hosts_managed_lines: []
+
+- name: Append operational host aliases
+  ansible.builtin.set_fact:
+    common_hosts_managed_lines: >-
+      {{ common_hosts_managed_lines + [item.ip ~ ' ' ~ item.alias] }}
+  loop: "{{ common_host_entries }}"
+  loop_control:
+    label: "{{ item.alias }}"
+
+- name: Append published project endpoints
+  ansible.builtin.set_fact:
+    common_hosts_managed_lines: >-
+      {{
+        common_hosts_managed_lines
+        + [
+            item.value.address
+            ~ ' '
+            ~ item.value.fqdn
+            ~ (
+                (' ' ~ (item.value.host_aliases | default([]) | join(' ')))
+                if (item.value.host_aliases | default([]) | length > 0)
+                else ''
+              )
+          ]
+      }}
+  loop: "{{ project_endpoints | dict2items }}"
+  loop_control:
+    label: "{{ item.value.fqdn }}"
+  when: item.value.host_publish | default(false)
+
+- name: Verify project host lines are structurally valid
+  ansible.builtin.assert:
+    that:
+      - common_hosts_managed_lines | length > 0
+      - common_hosts_managed_lines | select('search', '\\n') | list | length == 0
+      - common_hosts_managed_lines | select('equalto', '') | list | length == 0
+    fail_msg: "Rendered /etc/hosts line list is invalid. Refusing to modify /etc/hosts."
+
+
+# ============================================================
+# /etc/hosts에 운영 Alias + 공식 Endpoint 등록
+# ============================================================
+
+- name: Configure project host aliases and endpoints
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} ANSIBLE MANAGED PROJECT HOST ALIASES"
-    block: |
-      {% for host in common_host_entries %}
-      {{ host.ip }} {{ host.alias }}
-      {% endfor %}
+    block: "{{ common_hosts_managed_lines | join('\n') }}"
     state: present
     create: true
 
@@ -38,6 +82,7 @@
     cmd: cat /etc/hosts
   register: common_hosts_result
   changed_when: false
+  check_mode: false
 
 
 # ============================================================

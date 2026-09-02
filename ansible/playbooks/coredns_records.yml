@@ -1,0 +1,11 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Purpose: Reconcile project endpoint records in CoreDNS only
+
+- name: Reconcile project endpoint records in CoreDNS
+  hosts: cp-01
+  become: true
+  gather_facts: false
+  roles:
+    - coredns_records
