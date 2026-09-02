@@ -91,6 +91,11 @@
   ansible.builtin.set_fact:
     coredns_corefile_changed: "{{ coredns_corefile_desired != coredns_corefile_current.stdout }}"
 
+- name: Build CoreDNS merge patch payload
+  ansible.builtin.set_fact:
+    coredns_patch_payload: >-
+      {{ {'data': {'Corefile': coredns_corefile_desired}} | to_json }}
+
 
 # ============================================================
 # Backup and apply only when changed
@@ -125,19 +130,22 @@
       - "CoreDNS change required = {{ coredns_corefile_changed }}"
       - "Published records = {{ coredns_endpoint_records | map(attribute='value.fqdn') | list }}"
 
-- name: Apply CoreDNS Corefile with project endpoint block
-  kubernetes.core.k8s:
-    state: present
-    kubeconfig: "{{ coredns_kubeconfig }}"
-    definition:
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: "{{ coredns_configmap_name }}"
-        namespace: "{{ coredns_namespace }}"
-      data:
-        Corefile: "{{ coredns_corefile_desired }}"
+- name: Apply CoreDNS project endpoint block
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - -n
+      - "{{ coredns_namespace }}"
+      - patch
+      - configmap
+      - "{{ coredns_configmap_name }}"
+      - --type=merge
+      - -p
+      - "{{ coredns_patch_payload }}"
   register: coredns_configmap_apply
+  changed_when: coredns_corefile_changed
   when:
     - coredns_corefile_changed
     - not ansible_check_mode
@@ -153,7 +161,6 @@
       - rollout
       - restart
       - "deployment/{{ coredns_deployment_name }}"
-  register: coredns_restart
   changed_when: true
   when:
     - coredns_corefile_changed
@@ -179,121 +186,118 @@
 
 # ============================================================
 # Runtime DNS regression gates
+# Ephemeral validation objects are evidence only, not Desired State changes.
 # ============================================================
 
-- name: Remove stale DNS validation Pod
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - delete
-      - pod
-      - "{{ coredns_validation_pod }}"
-      - --ignore-not-found=true
-      - --wait=true
-  changed_when: false
-  check_mode: false
-
-- name: Create DNS validation Pod
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - run
-      - "{{ coredns_validation_pod }}"
-      - "--image={{ coredns_validation_image }}"
-      - --restart=Never
-      - --command
-      - --
-      - sleep
-      - "300"
-  changed_when: true
+- name: Validate CoreDNS runtime paths
   when: not ansible_check_mode
+  block:
+    - name: Remove stale DNS validation Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - delete
+          - pod
+          - "{{ coredns_validation_pod }}"
+          - --ignore-not-found=true
+          - --wait=true
+      changed_when: false
 
-- name: Wait for DNS validation Pod Ready
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - wait
-      - "--for=condition=Ready"
-      - "pod/{{ coredns_validation_pod }}"
-      - --timeout=60s
-  changed_when: false
-  when: not ansible_check_mode
+    - name: Create DNS validation Pod
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - run
+          - "{{ coredns_validation_pod }}"
+          - "--image={{ coredns_validation_image }}"
+          - --restart=Never
+          - --command
+          - --
+          - sleep
+          - "300"
+      changed_when: false
 
-- name: Validate Kubernetes Service DNS
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - exec
-      - "{{ coredns_validation_pod }}"
-      - --
-      - nslookup
-      - kubernetes.default.svc.cluster.local
-  register: coredns_validate_cluster
-  changed_when: false
-  when: not ansible_check_mode
+    - name: Wait for DNS validation Pod Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - wait
+          - "--for=condition=Ready"
+          - "pod/{{ coredns_validation_pod }}"
+          - --timeout=60s
+      changed_when: false
 
-- name: Validate Project Endpoint DNS records
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - exec
-      - "{{ coredns_validation_pod }}"
-      - --
-      - nslookup
-      - "{{ item.value.fqdn }}"
-  loop: "{{ coredns_endpoint_records }}"
-  loop_control:
-    label: "{{ item.value.fqdn }}"
-  register: coredns_validate_project
-  changed_when: false
-  when: not ansible_check_mode
+    - name: Validate Kubernetes Service DNS
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - exec
+          - "{{ coredns_validation_pod }}"
+          - --
+          - nslookup
+          - kubernetes.default.svc.cluster.local
+      register: coredns_validate_cluster
+      changed_when: false
 
-- name: Verify Project Endpoint DNS answers contain expected addresses
-  ansible.builtin.assert:
-    that:
-      - item.item.value.address in item.stdout
-    fail_msg: >-
-      {{ item.item.value.fqdn }} did not resolve to expected address {{ item.item.value.address }}.
-  loop: "{{ coredns_validate_project.results | default([]) }}"
-  loop_control:
-    label: "{{ item.item.value.fqdn | default('unknown') }}"
-  when: not ansible_check_mode
+    - name: Validate Project Endpoint DNS records
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - exec
+          - "{{ coredns_validation_pod }}"
+          - --
+          - nslookup
+          - "{{ item.value.fqdn }}"
+      loop: "{{ coredns_endpoint_records }}"
+      loop_control:
+        label: "{{ item.value.fqdn }}"
+      register: coredns_validate_project
+      changed_when: false
 
-- name: Validate external forwarded DNS
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - exec
-      - "{{ coredns_validation_pod }}"
-      - --
-      - nslookup
-      - "{{ coredns_external_validation_name }}"
-  register: coredns_validate_external
-  changed_when: false
-  when: not ansible_check_mode
+    - name: Verify Project Endpoint DNS answers contain expected addresses
+      ansible.builtin.assert:
+        that:
+          - item.item.value.address in item.stdout
+        fail_msg: >-
+          {{ item.item.value.fqdn }} did not resolve to expected address {{ item.item.value.address }}.
+      loop: "{{ coredns_validate_project.results }}"
+      loop_control:
+        label: "{{ item.item.value.fqdn }}"
 
-- name: Remove DNS validation Pod after tests
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - delete
-      - pod
-      - "{{ coredns_validation_pod }}"
-      - --ignore-not-found=true
-      - --wait=true
-  changed_when: false
-  when: not ansible_check_mode
+    - name: Validate external forwarded DNS
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - exec
+          - "{{ coredns_validation_pod }}"
+          - --
+          - nslookup
+          - "{{ coredns_external_validation_name }}"
+      register: coredns_validate_external
+      changed_when: false
+
+  always:
+    - name: Remove DNS validation Pod after tests
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - delete
+          - pod
+          - "{{ coredns_validation_pod }}"
+          - --ignore-not-found=true
+          - --wait=true
+      changed_when: false
