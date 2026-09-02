@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: identity_svc/game_svc/db_admin 계정 코드화 (이슈 #91)
+
+- name: MariaDB Runtime 계정 분리 코드화
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+
+  roles:
+    - mariadb_account
