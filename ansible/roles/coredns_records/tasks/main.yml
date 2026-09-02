@@ -89,16 +89,25 @@
       {{ coredns_forward_anchor }}{{ coredns_corefile_after_forward }}
   when: coredns_managed_begin not in coredns_corefile_current.stdout
 
+- name: Build rendered CoreDNS line list
+  ansible.builtin.set_fact:
+    coredns_desired_lines: "{{ coredns_corefile_desired.splitlines() }}"
+
+- name: Locate CoreDNS forward plugin line
+  ansible.builtin.set_fact:
+    coredns_forward_line_index: "{{ coredns_desired_lines.index(coredns_forward_anchor) }}"
+  when: coredns_forward_anchor in coredns_desired_lines
+
 - name: Verify rendered CoreDNS Corefile structure before apply
   ansible.builtin.assert:
     that:
-      - coredns_corefile_desired.count(coredns_forward_anchor) == 1
       - coredns_managed_begin in coredns_corefile_desired
       - coredns_managed_end in coredns_corefile_desired
-      - coredns_corefile_desired | regex_search('\\\\n') is none
-      - coredns_corefile_desired | regex_search('(?ms)forward \\. /etc/resolv\\.conf \\{.*?max_concurrent\\s+1000.*?\\}') is not none
+      - coredns_forward_anchor in coredns_desired_lines
+      - coredns_desired_lines | select('equalto', coredns_forward_anchor) | list | length == 1
+      - (coredns_desired_lines[coredns_forward_line_index | int + 1] | trim) == 'max_concurrent 1000'
     fail_msg: >-
-      Rendered CoreDNS Corefile failed structural preflight. Refusing to modify the live ConfigMap.
+      Rendered CoreDNS Corefile failed structural preflight. The forward plugin must remain on its own line with max_concurrent inside the block. Refusing to modify the live ConfigMap.
 
 - name: Detect CoreDNS Corefile change
   ansible.builtin.set_fact:
