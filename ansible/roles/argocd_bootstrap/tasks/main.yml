@@ -74,23 +74,39 @@
   delegate_to: localhost
   become: false
 
+- name: Root Application 임시 Manifest 파일 생성
+  ansible.builtin.tempfile:
+    state: file
+    prefix: "root-application-{{ argocd_namespace }}-"
+    suffix: ".yaml"
+  register: root_application_manifest_temp
+  delegate_to: localhost
+  become: false
+
 - name: Root Application Manifest 생성
   ansible.builtin.template:
     src: root-application.yaml.j2
-    dest: "/tmp/root-application-{{ argocd_namespace }}.yaml"
-    mode: "0644"
+    dest: "{{ root_application_manifest_temp.path }}"
+    mode: "0600"
   delegate_to: localhost
   become: false
 
 - name: Root Application 등록/갱신
   kubernetes.core.k8s:
     kubeconfig: "{{ argocd_kubeconfig }}"
-    src: "/tmp/root-application-{{ argocd_namespace }}.yaml"
+    src: "{{ root_application_manifest_temp.path }}"
     state: present
     server_side_apply:
       field_manager: "{{ argocd_field_manager }}"
       force_conflicts: true
   register: root_app_apply_result
+  delegate_to: localhost
+  become: false
+
+- name: Root Application 임시 Manifest 제거
+  ansible.builtin.file:
+    path: "{{ root_application_manifest_temp.path }}"
+    state: absent
   delegate_to: localhost
   become: false
 

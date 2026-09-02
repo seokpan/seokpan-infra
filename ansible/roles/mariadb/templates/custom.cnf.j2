@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# Owner: 김상희 | Project: 石나가는 판단
+#
+# read_only는 의도적으로 이 파일에 넣지 않는다.
+# MaxScale MariaDB-Monitor의 enforce_read_only_slaves=true가 런타임에서
+# 현재 역할(Master/Replica) 기준으로 read_only를 단독 관리한다.
+# 이 파일에 read_only를 고정하면 auto_failover로 역할이 바뀐 뒤 재시작 시
+# 옛 역할 기준의 read_only 값이 되살아나 장애로 이어질 수 있다 (#50).
+
+[mysqld]
+bind-address=0.0.0.0
+port=3306
+server-id={{ mariadb_server_id }}
+log-bin=mariadb-bin
+log-bin-index=mariadb-bin.index
+binlog_format=ROW
+expire_logs_days=7
+gtid_domain_id={{ mariadb_gtid_domain_id }}
+gtid_strict_mode=ON
+log_slave_updates=ON
