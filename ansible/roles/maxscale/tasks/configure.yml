@@ -11,3 +11,4 @@
     group: maxscale
     mode: "0640"
   notify: restart maxscale
+  diff: false
