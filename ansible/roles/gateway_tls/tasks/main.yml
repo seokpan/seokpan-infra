@@ -1,0 +1,361 @@
+---
+# 작성자: 석판팀
+# Project: 石나가는 판단
+# Scope: Gateway TLS Certificate / Kubernetes TLS Secret Provider
+# 관련: seokpan-infra#111, seokpan-gitops#22
+#
+# 원칙:
+# - Seokpan Internal Root CA는 재사용한다.
+# - Gateway 전용 Leaf Certificate/Private Key는 Harbor와 분리한다.
+# - CA Private Key는 Controller 밖으로 반출하지 않는다.
+# - Gateway/NginxProxy는 GitOps가 소유하며 이 Role은 TLS Secret Provider만 담당한다.
+# - Secret 실제 값/Private Key는 로그에 노출하지 않는다.
+
+# ============================================================
+# 1. 실행 위치 / 필수 계약 확인
+# ============================================================
+
+- name: Gateway TLS Role이 Ansible Controller에서 실행되는지 확인
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in groups['ansible_controller']
+      - cluster_kubeconfig is defined
+      - gateway_tls_fqdn | length > 0
+      - gateway_tls_san | length > 0
+      - gateway_tls_namespace | length > 0
+      - gateway_tls_secret_name | length > 0
+    fail_msg: >-
+      gateway_tls Role은 ansible_controller에서 실행해야 하며
+      cluster_kubeconfig 및 Gateway TLS 계약 변수가 필요합니다.
+
+- name: Internal Root CA Certificate 존재 확인
+  ansible.builtin.stat:
+    path: "{{ internal_ca_cert_path }}"
+  register: gateway_tls_root_ca_cert
+
+- name: Internal Root CA Private Key 존재 확인
+  ansible.builtin.stat:
+    path: "{{ internal_ca_key_path }}"
+  register: gateway_tls_root_ca_key
+  no_log: true
+
+- name: Internal Root CA 준비 상태 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_root_ca_cert.stat.exists
+      - gateway_tls_root_ca_key.stat.exists
+    fail_msg: >-
+      Seokpan Internal Root CA가 준비되어 있지 않습니다.
+      playbooks/internal_ca.yml을 먼저 확인하세요.
+
+- name: application Namespace 존재 확인
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ gateway_tls_namespace }}"
+  register: gateway_tls_namespace_info
+  changed_when: false
+
+- name: Gateway TLS 대상 Namespace 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_namespace_info.resources | length == 1
+    fail_msg: >-
+      Namespace {{ gateway_tls_namespace }} 가 없습니다.
+      Namespace는 GitOps/RBAC Bootstrap 소유이므로 gateway_tls Role에서 임의 생성하지 않습니다.
+
+# ============================================================
+# 2. 기존 Leaf Certificate 상태 확인
+# ============================================================
+
+- name: Gateway TLS 작업 디렉토리 준비
+  ansible.builtin.file:
+    path: "{{ gateway_tls_work_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: 기존 Gateway Certificate 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_cert_path }}"
+  register: gateway_tls_existing_cert
+
+- name: 기존 Gateway Private Key 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_key_path }}"
+  register: gateway_tls_existing_key
+  no_log: true
+
+- name: 기존 Certificate 만료 임박 여부 확인
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      -checkend {{ gateway_tls_renew_before_seconds }}
+  register: gateway_tls_existing_expiry
+  changed_when: false
+  failed_when: false
+  when: gateway_tls_existing_cert.stat.exists
+
+- name: 기존 Certificate Hostname/SAN 확인
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      -checkhost {{ gateway_tls_fqdn }}
+  register: gateway_tls_existing_hostname
+  changed_when: false
+  failed_when: false
+  when: gateway_tls_existing_cert.stat.exists
+
+- name: 기존 Certificate Modulus 확인
+  ansible.builtin.command:
+    cmd: "openssl x509 -in {{ gateway_tls_cert_path }} -noout -modulus"
+  register: gateway_tls_existing_cert_modulus
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - gateway_tls_existing_cert.stat.exists
+    - gateway_tls_existing_key.stat.exists
+
+- name: 기존 Private Key Modulus 확인
+  ansible.builtin.command:
+    cmd: "openssl rsa -in {{ gateway_tls_key_path }} -noout -modulus"
+  register: gateway_tls_existing_key_modulus
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - gateway_tls_existing_cert.stat.exists
+    - gateway_tls_existing_key.stat.exists
+
+- name: Gateway Leaf Certificate 재발급 필요 여부 결정
+  ansible.builtin.set_fact:
+    gateway_tls_needs_issue: >-
+      {{
+        (not gateway_tls_existing_cert.stat.exists)
+        or (not gateway_tls_existing_key.stat.exists)
+        or ((gateway_tls_existing_expiry.rc | default(1)) != 0)
+        or ((gateway_tls_existing_hostname.rc | default(1)) != 0)
+        or ((gateway_tls_existing_cert_modulus.rc | default(1)) != 0)
+        or ((gateway_tls_existing_key_modulus.rc | default(1)) != 0)
+        or (
+          (gateway_tls_existing_cert_modulus.stdout | default(''))
+          != (gateway_tls_existing_key_modulus.stdout | default(''))
+        )
+      }}
+  no_log: true
+
+# ============================================================
+# 3. Gateway 전용 Leaf Certificate 발급
+# ============================================================
+
+- name: Gateway 전용 Private Key 생성
+  ansible.builtin.command:
+    cmd: >-
+      openssl genrsa -out {{ gateway_tls_key_path }} {{ gateway_tls_key_bits }}
+  when: gateway_tls_needs_issue
+  no_log: true
+
+- name: Gateway CSR 생성
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -new
+      -key {{ gateway_tls_key_path }}
+      -out {{ gateway_tls_csr_path }}
+      -subj /C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ gateway_tls_fqdn }}
+      -addext subjectAltName={{ gateway_tls_san }}
+  when: gateway_tls_needs_issue
+  no_log: true
+
+- name: Gateway SAN Extension 파일 생성
+  ansible.builtin.copy:
+    dest: "{{ gateway_tls_ext_path }}"
+    content: "subjectAltName={{ gateway_tls_san }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  when: gateway_tls_needs_issue
+
+- name: Internal Root CA로 Gateway Certificate 서명
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -req
+      -in {{ gateway_tls_csr_path }}
+      -CA {{ internal_ca_cert_path }}
+      -CAkey {{ internal_ca_key_path }}
+      -CAserial {{ internal_ca_dir }}/ca.srl
+      -out {{ gateway_tls_cert_path }}
+      -days {{ gateway_tls_days }}
+      -sha256
+      -extfile {{ gateway_tls_ext_path }}
+  when: gateway_tls_needs_issue
+  no_log: true
+
+- name: Gateway Private Key 권한 고정
+  ansible.builtin.file:
+    path: "{{ gateway_tls_key_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Gateway Certificate 권한 고정
+  ansible.builtin.file:
+    path: "{{ gateway_tls_cert_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: 임시 CSR 제거
+  ansible.builtin.file:
+    path: "{{ gateway_tls_csr_path }}"
+    state: absent
+  when: gateway_tls_needs_issue
+
+- name: 임시 SAN Extension 파일 제거
+  ansible.builtin.file:
+    path: "{{ gateway_tls_ext_path }}"
+    state: absent
+  when: gateway_tls_needs_issue
+
+# ============================================================
+# 4. 발급 결과 최종 검증
+# ============================================================
+
+- name: Gateway Certificate Hostname/SAN 최종 검증
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      -checkhost {{ gateway_tls_fqdn }}
+  register: gateway_tls_final_hostname
+  changed_when: false
+
+- name: Gateway Certificate 만료 기준 최종 검증
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      -checkend {{ gateway_tls_renew_before_seconds }}
+  register: gateway_tls_final_expiry
+  changed_when: false
+
+- name: Gateway Certificate Modulus 최종 확인
+  ansible.builtin.command:
+    cmd: "openssl x509 -in {{ gateway_tls_cert_path }} -noout -modulus"
+  register: gateway_tls_final_cert_modulus
+  changed_when: false
+  no_log: true
+
+- name: Gateway Private Key Modulus 최종 확인
+  ansible.builtin.command:
+    cmd: "openssl rsa -in {{ gateway_tls_key_path }} -noout -modulus"
+  register: gateway_tls_final_key_modulus
+  changed_when: false
+  no_log: true
+
+- name: Gateway Certificate / Private Key Pair 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_final_cert_modulus.stdout == gateway_tls_final_key_modulus.stdout
+    fail_msg: "Gateway Certificate와 Private Key가 일치하지 않습니다."
+  no_log: true
+
+# ============================================================
+# 5. Kubernetes TLS Secret Desired State 수렴
+# ============================================================
+
+- name: Gateway Certificate 읽기
+  ansible.builtin.slurp:
+    src: "{{ gateway_tls_cert_path }}"
+  register: gateway_tls_cert_content
+  no_log: true
+
+- name: Gateway Private Key 읽기
+  ansible.builtin.slurp:
+    src: "{{ gateway_tls_key_path }}"
+  register: gateway_tls_key_content
+  no_log: true
+
+- name: 기존 Gateway TLS Secret 조회
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ gateway_tls_namespace }}"
+    name: "{{ gateway_tls_secret_name }}"
+  register: gateway_tls_secret_info
+  changed_when: false
+  no_log: true
+
+- name: Gateway TLS Secret 갱신 필요 여부 결정
+  ansible.builtin.set_fact:
+    gateway_tls_secret_needs_update: >-
+      {{
+        (gateway_tls_secret_info.resources | length == 0)
+        or (
+          (gateway_tls_secret_info.resources[0].type | default(''))
+          != 'kubernetes.io/tls'
+        )
+        or (
+          (gateway_tls_secret_info.resources[0].data['tls.crt'] | default(''))
+          != gateway_tls_cert_content.content
+        )
+        or (
+          (gateway_tls_secret_info.resources[0].data['tls.key'] | default(''))
+          != gateway_tls_key_content.content
+        )
+      }}
+  no_log: true
+
+- name: Gateway TLS Secret 생성 또는 갱신
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ gateway_tls_secret_name }}"
+        namespace: "{{ gateway_tls_namespace }}"
+      type: kubernetes.io/tls
+      data:
+        tls.crt: "{{ gateway_tls_cert_content.content }}"
+        tls.key: "{{ gateway_tls_key_content.content }}"
+  when: gateway_tls_secret_needs_update
+  no_log: true
+
+- name: Gateway TLS Secret 최종 조회
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ gateway_tls_namespace }}"
+    name: "{{ gateway_tls_secret_name }}"
+  register: gateway_tls_secret_final
+  changed_when: false
+  no_log: true
+
+- name: Gateway TLS Secret 최종 계약 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_secret_final.resources | length == 1
+      - gateway_tls_secret_final.resources[0].type == 'kubernetes.io/tls'
+      - gateway_tls_secret_final.resources[0].data['tls.crt'] == gateway_tls_cert_content.content
+      - gateway_tls_secret_final.resources[0].data['tls.key'] == gateway_tls_key_content.content
+    fail_msg: "Gateway TLS Secret이 의도한 Certificate/Private Key로 수렴하지 않았습니다."
+  no_log: true
+
+# ============================================================
+# 6. 비밀정보 없는 결과 요약
+# ============================================================
+
+- name: Gateway TLS Provider 결과 요약
+  ansible.builtin.debug:
+    msg:
+      - "FQDN = {{ gateway_tls_fqdn }}"
+      - "Namespace = {{ gateway_tls_namespace }}"
+      - "Secret = {{ gateway_tls_secret_name }}"
+      - "Secret Type = kubernetes.io/tls"
+      - "Leaf Certificate 재발급 = {{ gateway_tls_needs_issue }}"
+      - "Kubernetes Secret 갱신 = {{ gateway_tls_secret_needs_update }}"
+      - "다음 Gate = seokpan-gitops#22 HTTPS Listener / NodePort / VIP Acceptance"
