@@ -14,16 +14,21 @@
 
 
 # ============================================================
-# /etc/hosts에 프로젝트용 고정 Alias 등록
+# /etc/hosts에 운영 Alias + 공식 Endpoint 등록
 # ============================================================
 
-- name: Configure project host aliases
+- name: Configure project host aliases and endpoints
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} ANSIBLE MANAGED PROJECT HOST ALIASES"
     block: |
       {% for host in common_host_entries %}
       {{ host.ip }} {{ host.alias }}
+      {% endfor %}
+      {% for endpoint in project_endpoints | dict2items %}
+      {% if endpoint.value.host_publish | default(false) %}
+      {{ endpoint.value.address }} {{ endpoint.value.fqdn }}{% for alias in endpoint.value.host_aliases | default([]) %} {{ alias }}{% endfor %}
+      {% endif %}
       {% endfor %}
     state: present
     create: true
@@ -38,6 +43,7 @@
     cmd: cat /etc/hosts
   register: common_hosts_result
   changed_when: false
+  check_mode: false
 
 
 # ============================================================

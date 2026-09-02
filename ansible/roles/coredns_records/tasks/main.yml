@@ -1,0 +1,299 @@
+---
+# ============================================================
+# Select Project Endpoint records published to Pod DNS
+# ============================================================
+
+- name: Select CoreDNS project endpoint records
+  ansible.builtin.set_fact:
+    coredns_endpoint_records: >-
+      {{
+        project_endpoints
+        | dict2items
+        | selectattr('value.coredns_publish', 'defined')
+        | selectattr('value.coredns_publish', 'equalto', true)
+        | list
+      }}
+
+- name: Verify CoreDNS project endpoint records exist
+  ansible.builtin.assert:
+    that:
+      - coredns_endpoint_records | length > 0
+    fail_msg: "No project_endpoints entries have coredns_publish=true."
+
+
+# ============================================================
+# Read current CoreDNS Corefile
+# ============================================================
+
+- name: Read current CoreDNS Corefile
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - -n
+      - "{{ coredns_namespace }}"
+      - get
+      - configmap
+      - "{{ coredns_configmap_name }}"
+      - -o
+      - 'jsonpath={.data.Corefile}'
+  register: coredns_corefile_current
+  changed_when: false
+  check_mode: false
+
+- name: Verify managed marker state is consistent
+  ansible.builtin.assert:
+    that:
+      - (coredns_managed_begin in coredns_corefile_current.stdout) == (coredns_managed_end in coredns_corefile_current.stdout)
+    fail_msg: >-
+      CoreDNS managed block marker is incomplete. Refusing to modify the Corefile automatically.
+
+- name: Verify CoreDNS insertion anchor exists
+  ansible.builtin.assert:
+    that:
+      - coredns_forward_anchor in coredns_corefile_current.stdout
+    fail_msg: >-
+      Expected CoreDNS forward anchor was not found. Review the current Corefile before changing it.
+  when: coredns_managed_begin not in coredns_corefile_current.stdout
+
+
+# ============================================================
+# Build only the project-managed hosts block
+# ============================================================
+
+- name: Render project endpoint hosts block
+  ansible.builtin.set_fact:
+    coredns_managed_block: "{{ lookup('template', 'hosts-block.j2') | trim }}"
+
+- name: Replace existing project endpoint hosts block
+  ansible.builtin.set_fact:
+    coredns_corefile_desired: >-
+      {{
+        coredns_corefile_current.stdout
+        | regex_replace(coredns_managed_pattern, coredns_managed_block)
+      }}
+  when: coredns_managed_begin in coredns_corefile_current.stdout
+
+- name: Insert project endpoint hosts block before forward plugin
+  ansible.builtin.set_fact:
+    coredns_corefile_desired: >-
+      {{
+        coredns_corefile_current.stdout
+        | replace(
+            coredns_forward_anchor,
+            coredns_managed_block ~ '\n' ~ coredns_forward_anchor
+          )
+      }}
+  when: coredns_managed_begin not in coredns_corefile_current.stdout
+
+- name: Detect CoreDNS Corefile change
+  ansible.builtin.set_fact:
+    coredns_corefile_changed: "{{ coredns_corefile_desired != coredns_corefile_current.stdout }}"
+
+
+# ============================================================
+# Backup and apply only when changed
+# ============================================================
+
+- name: Ensure CoreDNS backup directory exists
+  ansible.builtin.file:
+    path: "{{ coredns_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when:
+    - coredns_corefile_changed
+    - not ansible_check_mode
+
+- name: Save CoreDNS pre-change Corefile backup
+  ansible.builtin.copy:
+    content: "{{ coredns_corefile_current.stdout }}\n"
+    dest: "{{ coredns_backup_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+    force: false
+  when:
+    - coredns_corefile_changed
+    - not ansible_check_mode
+
+- name: Show intended project CoreDNS records
+  ansible.builtin.debug:
+    msg:
+      - "CoreDNS change required = {{ coredns_corefile_changed }}"
+      - "Published records = {{ coredns_endpoint_records | map(attribute='value.fqdn') | list }}"
+
+- name: Apply CoreDNS Corefile with project endpoint block
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ coredns_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ coredns_configmap_name }}"
+        namespace: "{{ coredns_namespace }}"
+      data:
+        Corefile: "{{ coredns_corefile_desired }}"
+  register: coredns_configmap_apply
+  when:
+    - coredns_corefile_changed
+    - not ansible_check_mode
+
+- name: Restart CoreDNS after Corefile change
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - -n
+      - "{{ coredns_namespace }}"
+      - rollout
+      - restart
+      - "deployment/{{ coredns_deployment_name }}"
+  register: coredns_restart
+  changed_when: true
+  when:
+    - coredns_corefile_changed
+    - not ansible_check_mode
+
+- name: Wait for CoreDNS rollout
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - -n
+      - "{{ coredns_namespace }}"
+      - rollout
+      - status
+      - "deployment/{{ coredns_deployment_name }}"
+      - --timeout=120s
+  changed_when: false
+  when:
+    - coredns_corefile_changed
+    - not ansible_check_mode
+
+
+# ============================================================
+# Runtime DNS regression gates
+# ============================================================
+
+- name: Remove stale DNS validation Pod
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - delete
+      - pod
+      - "{{ coredns_validation_pod }}"
+      - --ignore-not-found=true
+      - --wait=true
+  changed_when: false
+  check_mode: false
+
+- name: Create DNS validation Pod
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - run
+      - "{{ coredns_validation_pod }}"
+      - "--image={{ coredns_validation_image }}"
+      - --restart=Never
+      - --command
+      - --
+      - sleep
+      - "300"
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Wait for DNS validation Pod Ready
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - wait
+      - "--for=condition=Ready"
+      - "pod/{{ coredns_validation_pod }}"
+      - --timeout=60s
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Validate Kubernetes Service DNS
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - exec
+      - "{{ coredns_validation_pod }}"
+      - --
+      - nslookup
+      - kubernetes.default.svc.cluster.local
+  register: coredns_validate_cluster
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Validate Project Endpoint DNS records
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - exec
+      - "{{ coredns_validation_pod }}"
+      - --
+      - nslookup
+      - "{{ item.value.fqdn }}"
+  loop: "{{ coredns_endpoint_records }}"
+  loop_control:
+    label: "{{ item.value.fqdn }}"
+  register: coredns_validate_project
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Verify Project Endpoint DNS answers contain expected addresses
+  ansible.builtin.assert:
+    that:
+      - item.item.value.address in item.stdout
+    fail_msg: >-
+      {{ item.item.value.fqdn }} did not resolve to expected address {{ item.item.value.address }}.
+  loop: "{{ coredns_validate_project.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.value.fqdn | default('unknown') }}"
+  when: not ansible_check_mode
+
+- name: Validate external forwarded DNS
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - exec
+      - "{{ coredns_validation_pod }}"
+      - --
+      - nslookup
+      - "{{ coredns_external_validation_name }}"
+  register: coredns_validate_external
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Remove DNS validation Pod after tests
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ coredns_kubeconfig }}"
+      - delete
+      - pod
+      - "{{ coredns_validation_pod }}"
+      - --ignore-not-found=true
+      - --wait=true
+  changed_when: false
+  when: not ansible_check_mode
