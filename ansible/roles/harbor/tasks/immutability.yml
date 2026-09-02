@@ -101,6 +101,7 @@
     - harbor_immutability_enabled | bool
     - _harbor_matching_immutability_rule.id is not defined
   register: _harbor_immutability_create
+  changed_when: true
   no_log: true
 
 - name: 기존 동일 Immutability Rule 활성화
@@ -129,6 +130,7 @@
     - _harbor_matching_immutability_rule.id is defined
     - _harbor_matching_immutability_rule.disabled | default(false) | bool
   register: _harbor_immutability_enable
+  changed_when: true
   no_log: true
 
 - name: Immutability Rule 최종 상태 재조회
