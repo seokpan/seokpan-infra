@@ -64,7 +64,8 @@
 
 - name: Render project endpoint hosts block
   ansible.builtin.set_fact:
-    coredns_managed_block: "{{ lookup('template', 'hosts-block.j2') | trim }}"
+    coredns_managed_block: >-
+      {{ lookup('template', 'hosts-block.j2') | trim | indent(4, true) }}
 
 - name: Replace existing project endpoint hosts block
   ansible.builtin.set_fact:
@@ -75,26 +76,40 @@
       }}
   when: coredns_managed_begin in coredns_corefile_current.stdout
 
+- name: Split CoreDNS Corefile around forward anchor
+  ansible.builtin.set_fact:
+    coredns_corefile_before_forward: "{{ coredns_corefile_current.stdout.split(coredns_forward_anchor, 1)[0] }}"
+    coredns_corefile_after_forward: "{{ coredns_corefile_current.stdout.split(coredns_forward_anchor, 1)[1] }}"
+  when: coredns_managed_begin not in coredns_corefile_current.stdout
+
 - name: Insert project endpoint hosts block before forward plugin
   ansible.builtin.set_fact:
-    coredns_corefile_desired: >-
-      {{
-        coredns_corefile_current.stdout
-        | replace(
-            coredns_forward_anchor,
-            coredns_managed_block ~ '\n' ~ coredns_forward_anchor
-          )
-      }}
+    coredns_corefile_desired: |-
+      {{ coredns_corefile_before_forward }}{{ coredns_managed_block }}
+      {{ coredns_forward_anchor }}{{ coredns_corefile_after_forward }}
   when: coredns_managed_begin not in coredns_corefile_current.stdout
+
+- name: Verify rendered CoreDNS Corefile structure before apply
+  ansible.builtin.assert:
+    that:
+      - coredns_corefile_desired.count(coredns_forward_anchor) == 1
+      - coredns_managed_begin in coredns_corefile_desired
+      - coredns_managed_end in coredns_corefile_desired
+      - coredns_corefile_desired | regex_search('\\\\n') is none
+      - coredns_corefile_desired | regex_search('(?ms)forward \\. /etc/resolv\\.conf \\{.*?max_concurrent\\s+1000.*?\\}') is not none
+    fail_msg: >-
+      Rendered CoreDNS Corefile failed structural preflight. Refusing to modify the live ConfigMap.
 
 - name: Detect CoreDNS Corefile change
   ansible.builtin.set_fact:
     coredns_corefile_changed: "{{ coredns_corefile_desired != coredns_corefile_current.stdout }}"
 
-- name: Build CoreDNS merge patch payload
+- name: Build CoreDNS merge and rollback patch payloads
   ansible.builtin.set_fact:
     coredns_patch_payload: >-
       {{ {'data': {'Corefile': coredns_corefile_desired}} | to_json }}
+    coredns_rollback_payload: >-
+      {{ {'data': {'Corefile': coredns_corefile_current.stdout}} | to_json }}
 
 
 # ============================================================
@@ -119,7 +134,7 @@
     owner: root
     group: root
     mode: "0640"
-    force: false
+    force: true
   when:
     - coredns_corefile_changed
     - not ansible_check_mode
@@ -130,58 +145,155 @@
       - "CoreDNS change required = {{ coredns_corefile_changed }}"
       - "Published records = {{ coredns_endpoint_records | map(attribute='value.fqdn') | list }}"
 
-- name: Apply CoreDNS project endpoint block
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - -n
-      - "{{ coredns_namespace }}"
-      - patch
-      - configmap
-      - "{{ coredns_configmap_name }}"
-      - --type=merge
-      - -p
-      - "{{ coredns_patch_payload }}"
-  register: coredns_configmap_apply
-  changed_when: coredns_corefile_changed
+- name: Apply and verify CoreDNS change with automatic rollback
   when:
     - coredns_corefile_changed
     - not ansible_check_mode
+  block:
+    - name: Apply CoreDNS project endpoint block
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - patch
+          - configmap
+          - "{{ coredns_configmap_name }}"
+          - --type=merge
+          - -p
+          - "{{ coredns_patch_payload }}"
+      register: coredns_configmap_apply
+      changed_when: true
 
-- name: Restart CoreDNS after Corefile change
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - -n
-      - "{{ coredns_namespace }}"
-      - rollout
-      - restart
-      - "deployment/{{ coredns_deployment_name }}"
-  changed_when: true
-  when:
-    - coredns_corefile_changed
-    - not ansible_check_mode
+    - name: Restart CoreDNS after Corefile change
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - rollout
+          - restart
+          - "deployment/{{ coredns_deployment_name }}"
+      changed_when: true
 
-- name: Wait for CoreDNS rollout
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - --kubeconfig
-      - "{{ coredns_kubeconfig }}"
-      - -n
-      - "{{ coredns_namespace }}"
-      - rollout
-      - status
-      - "deployment/{{ coredns_deployment_name }}"
-      - --timeout=120s
-  changed_when: false
-  when:
-    - coredns_corefile_changed
-    - not ansible_check_mode
+    - name: Wait for CoreDNS rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - rollout
+          - status
+          - "deployment/{{ coredns_deployment_name }}"
+          - --timeout=120s
+      changed_when: false
+
+  rescue:
+    - name: Capture CoreDNS Pod state after failed rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - get
+          - pods
+          - -l
+          - k8s-app=kube-dns
+          - -o
+          - wide
+      register: coredns_failure_pods
+      changed_when: false
+      failed_when: false
+
+    - name: Capture CoreDNS logs after failed rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - logs
+          - -l
+          - k8s-app=kube-dns
+          - --all-containers=true
+          - --prefix=true
+          - --tail=100
+      register: coredns_failure_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Capture recent kube-system events after failed rollout
+      ansible.builtin.shell: >-
+        kubectl --kubeconfig {{ coredns_kubeconfig | quote }}
+        -n {{ coredns_namespace | quote }}
+        get events --sort-by=.lastTimestamp | tail -n 60
+      register: coredns_failure_events
+      changed_when: false
+      failed_when: false
+
+    - name: Display CoreDNS failure evidence before rollback
+      ansible.builtin.debug:
+        msg:
+          - "Pods:\n{{ coredns_failure_pods.stdout | default('') }}"
+          - "Logs:\n{{ coredns_failure_logs.stdout | default('') }}"
+          - "Events:\n{{ coredns_failure_events.stdout | default('') }}"
+
+    - name: Restore pre-change CoreDNS Corefile
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - patch
+          - configmap
+          - "{{ coredns_configmap_name }}"
+          - --type=merge
+          - -p
+          - "{{ coredns_rollback_payload }}"
+      changed_when: true
+
+    - name: Restart CoreDNS after rollback
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - rollout
+          - restart
+          - "deployment/{{ coredns_deployment_name }}"
+      changed_when: true
+
+    - name: Wait for CoreDNS rollback recovery
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ coredns_kubeconfig }}"
+          - -n
+          - "{{ coredns_namespace }}"
+          - rollout
+          - status
+          - "deployment/{{ coredns_deployment_name }}"
+          - --timeout=120s
+      changed_when: false
+
+    - name: Stop after automatic CoreDNS rollback
+      ansible.builtin.fail:
+        msg: >-
+          CoreDNS rollout failed. Failure evidence was collected and the pre-change Corefile was restored successfully.
 
 
 # ============================================================
