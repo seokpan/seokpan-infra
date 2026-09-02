@@ -39,6 +39,7 @@ harbor_firewall_ports:
 harbor_https_port: 443
 harbor_http_port: 80
 harbor_data_volume: "/data"
+harbor_project_name: "seokpan"
 
 # 11번 Runbook 4장 표 명시: Harbor :9090(metrics) - Prometheus 스크레이프 대상
 harbor_metric_port: 9090
