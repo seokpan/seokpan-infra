@@ -1,0 +1,8 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-09-01
+#
+# [신규] 모든 그룹에 공통 적용되는 비-Secret 설정값.
+# registry 그룹의 vars.yml(harbor_project_name 등)과 동일한 패턴 - 평문 값,
+# 암호화 대상은 group_vars/all/vault.yml로 분리 유지.
+
+cluster_kubeconfig: "/etc/seokpan/kubeconfig/admin.conf"

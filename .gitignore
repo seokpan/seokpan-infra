@@ -58,6 +58,9 @@ id_dsa.*
 kubeconfig
 kubeconfig.*
 *kubeconfig*
+!ansible/playbooks/controller_kubeconfig.yml
+!ansible/roles/controller_kubeconfig/
+!ansible/roles/controller_kubeconfig/**
 
 # Cloud / API credential files
 .aws/
