@@ -1,0 +1,17 @@
+---
+# Harbor Project Tag Immutability API 전용 적용
+# - Harbor VM SSH 관리경로와 분리
+# - Inventory의 harbor host_vars/Vault 변수는 그대로 사용
+# - 실제 실행은 Ansible Controller(localhost)에서 Harbor HTTPS API 호출
+
+- name: Configure Harbor Project Tag Immutability via API
+  hosts: registry
+  gather_facts: false
+  connection: local
+  become: false
+
+  tasks:
+    - name: Apply Harbor Immutability policy
+      ansible.builtin.include_role:
+        name: harbor
+        tasks_from: immutability
