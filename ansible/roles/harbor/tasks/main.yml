@@ -34,6 +34,7 @@
   register: harbor_core_running
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Set install-needed fact
   ansible.builtin.set_fact:
@@ -100,6 +101,7 @@
   changed_when: false
   failed_when: false
   when: harbor_manage_firewall
+  check_mode: false
 
 
 # ============================================================
@@ -127,6 +129,7 @@
   changed_when: false
   failed_when: false
   when: harbor_manage_firewall
+  check_mode: false
 
 
 # ============================================================
@@ -328,6 +331,7 @@
   retries: 5
   delay: 5
   until: harbor_health_check.status in [200, 301, 302]
+  check_mode: false
 
 - name: Check certificate SAN
   ansible.builtin.command:
