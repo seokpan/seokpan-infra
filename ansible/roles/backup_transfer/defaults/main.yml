@@ -1,0 +1,49 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: backup_transfer role default variables (이슈 #55)
+
+mariadb_master_delegate_host: maxscale-01
+stone_game_db: stone_game
+mariadb_socket_path: /var/lib/mysql/mysql.sock
+
+backup_transfer_local_base_dir: /srv/nfs/db-backup
+
+# NFS 서버 실제 Export 설정 그대로 반영
+# (192.168.0.0/16, rw,sync,no_subtree_check,no_root_squash — nfs_server role defaults와 동일 대상)
+backup_transfer_nfs_export_host: 192.168.54.50
+backup_transfer_nfs_export_path: /srv/nfs/db-backup
+backup_transfer_nfs_mount_point: /mnt/nfs-db-backup
+
+backup_transfer_retention_days: 7
+
+backup_transfer_cron_hour: "2"
+backup_transfer_cron_minute: "0"
+
+backup_transfer_log_dir: /var/log/seokpan
+backup_transfer_credentials_file: /root/.backup_svc.cnf
+backup_transfer_script_path: /usr/local/sbin/seokpan_mariadb_backup.sh
+
+# failover 전환 도중 read_only 상태가 일시적으로 불안정할 수 있어
+# 즉시 skip하지 않고 일정 간격으로 재확인 (최대 30분 대기 후 포기)
+backup_transfer_role_stabilize_max_retries: 6
+backup_transfer_role_stabilize_retry_interval_seconds: 300
+
+# 마지막 성공 백업 시점의 GTID 위치를 기록 — 그 이후 변경이 없으면 백업 스킵
+# (#114 Full+Incremental 체이닝과는 다른 개념: "변경 없으면 통째로 생략")
+backup_transfer_state_file: "{{ backup_transfer_local_base_dir }}/.last_backup_gtid"
+
+# 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
+backup_restore_target_dir: /var/lib/mysql-restore-test
+backup_restore_working_dir: /var/lib/mysql-restore-test-working
+backup_restore_socket: /var/lib/mysql-restore-test/mariadb-restore.sock
+backup_restore_port: 3307
+backup_restore_validation_tables:
+  - member
+  - member_stats
+  - game
+  - game_participant
+  - move
+  - game_result
+  - rating_history
