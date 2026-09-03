@@ -7,7 +7,7 @@ Type=simple
 User=mysql
 Group=mysql
 ExecStart=/usr/sbin/mariadbd --datadir={{ backup_restore_target_dir }} \
-  --socket={{ backup_restore_socket }} --port={{ backup_restore_port }} \
+  --socket={{ backup_restore_socket }} --skip-networking \
   --pid-file={{ backup_restore_target_dir }}/mariadb-restore.pid
 Restart=no
 
