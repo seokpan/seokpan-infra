@@ -59,12 +59,12 @@
     definition:
       apiVersion: v1
       kind: Secret
-      type: kubernetes.io/dockerconfigjson
+      type: Opaque
       metadata:
         name: harbor-robot-dockerconfig
         namespace: cicd
       data:
-        .dockerconfigjson: >-
+        config.json: >-
           {{
             {
               'auths': {
