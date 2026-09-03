@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Owner: 김상희 / Scope: Data, Storage & Recovery / Project: 石나가는 판단
+# Purpose: cron으로 주기 실행되는 MariaDB Full+Incremental 체이닝 백업 + NFS 전송 + Retention 스크립트 (이슈 #114)
+#          - Replica(읽기 전용) 대상 백업, GTID 미변경 시 스킵 원칙은 #55와 동일 (Full/Incremental 공통)
+#          - 일요일 02:00: Full, 그 외 요일 02:00: Incremental (cron에서 --mode 인자로 구분)
+#          - 백업 구조: chain_<타임스탬프>/full_<타임스탬프>, chain_<타임스탬프>/incr_<타임스탬프>
+#          - Full은 백업 시점에 --prepare 하지 않고 raw 보관 (체인이 다 모인 뒤 복구 시점에 롤포워드)
+#          - 상태는 JSON(STATE_FILE)으로 관리: chain_dir(현재 진행 중인 체인), last_backup_dir(다음
+#            Incremental의 --incremental-basedir), last_gtid(스킵 판단 기준)
+#          - Full이 GTID 미변경으로 스킵되면 그 주 chain_dir이 없음 -> 이후 Incremental은 basedir
+#            없음으로 스킵 (데이터 유실 아님, RPO만 그 구간만큼 성겨짐 -> WARNING 로그로 명시)
+
+set -euo pipefail
+
+MODE="${1:-}"   # full | incr (schedule.yml의 cron job에서 인자로 전달)
+if [ "${MODE}" != "full" ] && [ "${MODE}" != "incr" ]; then
+  echo "사용법: $0 [full|incr]" >&2
+  exit 2
+fi
+
+CRED_FILE="{{ backup_transfer_credentials_file }}"
+SOCKET="{{ mariadb_socket_path }}"
+LOCAL_BASE_DIR="{{ backup_transfer_local_base_dir }}"
+NFS_MOUNT="{{ backup_transfer_nfs_mount_point }}"
+RETENTION_DAYS={{ backup_transfer_retention_days }}
+LOG_DIR="{{ backup_transfer_log_dir }}"
+STATE_FILE="{{ backup_transfer_state_file }}"
+MAX_RETRIES={{ backup_transfer_role_stabilize_max_retries }}
+RETRY_INTERVAL={{ backup_transfer_role_stabilize_retry_interval_seconds }}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+mkdir -p "${LOG_DIR}"
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${MODE}] $*"
+}
+
+mysql_exec() {
+  mysql --defaults-extra-file="${CRED_FILE}" --socket="${SOCKET}" -N -B -e "$1"
+}
+
+# --- 상태 파일 읽기/쓰기 헬퍼 (jq 의존, prepare.yml에서 jq 패키지 설치 필요) ---
+state_get() {
+  local key="$1"
+  if [ -f "${STATE_FILE}" ]; then
+    jq -r --arg k "${key}" '.[$k] // empty' "${STATE_FILE}"
+  fi
+}
+
+state_set() {
+  # state_set chain_dir <value> last_backup_dir <value> last_gtid <value> ...
+  local tmp
+  tmp=$(mktemp)
+  local current="{}"
+  if [ -f "${STATE_FILE}" ]; then
+    current=$(cat "${STATE_FILE}")
+  fi
+  echo "${current}" > "${tmp}"
+  while [ "$#" -ge 2 ]; do
+    local k="$1" v="$2"
+    jq --arg k "${k}" --arg v "${v}" '.[$k] = $v' "${tmp}" > "${tmp}.new" && mv "${tmp}.new" "${tmp}"
+    shift 2
+  done
+  mv "${tmp}" "${STATE_FILE}"
+}
+
+apply_retention() {
+  # Retention은 체인 단위: chain_<ts> 디렉터리 전체의 mtime 기준(가장 최근 갱신된 파일 기준)
+  # 진행 중인 체인(state의 chain_dir)은 mtime과 무관하게 항상 보존
+  local current_chain
+  current_chain=$(state_get chain_dir)
+
+  for base in "${LOCAL_BASE_DIR}" "${NFS_MOUNT}"; do
+    find "${base}" -maxdepth 1 -type d -name 'chain_*' -mtime "+${RETENTION_DAYS}" | while read -r d; do
+      if [ -n "${current_chain}" ] && [ "$(basename "${d}")" = "${current_chain}" ]; then
+        log "진행 중인 체인(${current_chain})은 Retention 대상에서 제외"
+        continue
+      fi
+      rm -rf "${d}"
+      log "Retention 삭제: ${d}"
+    done
+  done
+  log "체인 단위 Retention 적용 완료 (${RETENTION_DAYS}일 초과)"
+}
+
+# 0. NFS 마운트 상태 확인
+if ! mountpoint -q "${NFS_MOUNT}"; then
+  log "NFS 마운트(${NFS_MOUNT})가 끊겨 있습니다. 백업을 중단합니다."
+  exit 1
+fi
+
+# 1. Replica(읽기 전용) 상태 안정화 대기 (#55와 동일 로직)
+ROLE_CONFIRMED_REPLICA=false
+for attempt in $(seq 1 "${MAX_RETRIES}"); do
+  READ_ONLY=$(mysql_exec "SHOW GLOBAL VARIABLES LIKE 'read_only';" | awk '{print $2}')
+  if [ "${READ_ONLY}" = "ON" ]; then
+    log "read_only=ON (시도 ${attempt}/${MAX_RETRIES}) — Replica로 판단, 백업을 진행합니다."
+    ROLE_CONFIRMED_REPLICA=true
+    break
+  fi
+  log "read_only=OFF (시도 ${attempt}/${MAX_RETRIES}) — 이 서버는 현재 Master로 판단."
+  if [ "${attempt}" -lt "${MAX_RETRIES}" ]; then
+    log "failover 전환 가능성을 고려해 ${RETRY_INTERVAL}초 후 재확인합니다."
+    sleep "${RETRY_INTERVAL}"
+  fi
+done
+
+if [ "${ROLE_CONFIRMED_REPLICA}" != "true" ]; then
+  log "최대 대기 시간 동안 계속 Master로 확인됨. 이 서버는 종료합니다."
+  exit 0
+fi
+
+# 2. Retention은 백업 성공/스킵 여부와 무관하게 매 실행마다 먼저 적용
+apply_retention
+
+# 3. 마지막 백업 이후 변경 여부 확인 (GTID 위치 비교, Full/Incremental 공통)
+CURRENT_GTID=$(mysql_exec "SELECT @@gtid_slave_pos;" | tail -n 1)
+LAST_GTID=$(state_get last_gtid)
+CHAIN_DIR=$(state_get chain_dir)
+LAST_BACKUP_DIR=$(state_get last_backup_dir)
+
+if [ -n "${LAST_GTID}" ] && [ "${CURRENT_GTID}" = "${LAST_GTID}" ]; then
+  log "마지막 백업 이후 GTID 변경 없음 (${CURRENT_GTID}) — 백업을 스킵합니다."
+  exit 0
+fi
+
+if [ "${MODE}" = "incr" ] && { [ -z "${CHAIN_DIR}" ] || [ -z "${LAST_BACKUP_DIR}" ]; }; then
+  log "WARNING: 이번 주 Full 미실행으로 chain 없음 — Incremental 스킵, RPO 저하 상태"
+  exit 0
+fi
+
+log "GTID 변경 감지: ${LAST_GTID:-<none>} -> ${CURRENT_GTID} — ${MODE} 백업을 진행합니다."
+
+# 4. 백업 대상 디렉터리 결정
+if [ "${MODE}" = "full" ]; then
+  CHAIN_DIR="chain_${TIMESTAMP}"
+  BACKUP_SUBDIR="full_${TIMESTAMP}"
+else
+  BACKUP_SUBDIR="incr_${TIMESTAMP}"
+fi
+
+BACKUP_DIR="${LOCAL_BASE_DIR}/${CHAIN_DIR}/${BACKUP_SUBDIR}"
+mkdir -p "${BACKUP_DIR}"
+
+# 5. 백업 실행 (Full은 신규, Incremental은 --incremental-basedir로 직전 백업 지정)
+BACKUP_LOG_MARKER_START=$(wc -l < "${LOG_DIR}/mariadb_backup.log" 2>/dev/null || echo 0)
+
+if [ "${MODE}" = "full" ]; then
+  mariadb-backup --defaults-extra-file="${CRED_FILE}" --backup \
+    --socket="${SOCKET}" --target-dir="${BACKUP_DIR}" >> "${LOG_DIR}/mariadb_backup.log" 2>&1
+  # Full은 --prepare 하지 않음 (raw 보관 — 복구 시점에 체인 전체 롤포워드)
+else
+  BASEDIR_FULL_PATH="${LOCAL_BASE_DIR}/${LAST_BACKUP_DIR}"
+  mariadb-backup --defaults-extra-file="${CRED_FILE}" --backup \
+    --socket="${SOCKET}" --target-dir="${BACKUP_DIR}" \
+    --incremental-basedir="${BASEDIR_FULL_PATH}" >> "${LOG_DIR}/mariadb_backup.log" 2>&1
+fi
+
+# 5-1. mariadb-backup 자체 완료 여부 명시적 확인 (비정상 종료 없이도 불완전하게 끝나는 경우 대비)
+#      exit code만으로는 불충분 — 공식적으로 "completed OK!" 문자열이 로그 마지막에 남아야 정상 완료
+if ! tail -n "+$((BACKUP_LOG_MARKER_START + 1))" "${LOG_DIR}/mariadb_backup.log" | grep -q 'completed OK!'; then
+  log "mariadb-backup이 'completed OK!' 없이 종료됨 — 백업 실패로 간주, 산출물 삭제 후 중단"
+  rm -rf "${BACKUP_DIR}"
+  exit 1
+fi
+log "mariadb-backup 완료 확인됨 (completed OK!)"
+
+# 6. Checksum (로컬 원본 무결성 기준선 — restore/restore_chain의 sha256sum -c와 동일 목적)
+cd "${BACKUP_DIR}"
+find . -type f ! -name 'SHA256SUMS' -exec sha256sum {} \; > SHA256SUMS
+cd - > /dev/null
+
+log "로컬 백업 완료: ${BACKUP_DIR}"
+
+# 7. NFS 마운트 경로로 전송
+mkdir -p "${NFS_MOUNT}/${CHAIN_DIR}/${BACKUP_SUBDIR}"
+rsync -a "${BACKUP_DIR}/" "${NFS_MOUNT}/${CHAIN_DIR}/${BACKUP_SUBDIR}/" >> "${LOG_DIR}/mariadb_backup.log" 2>&1
+
+log "NFS 전송 완료: ${NFS_MOUNT}/${CHAIN_DIR}/${BACKUP_SUBDIR}"
+
+# 7-1. NFS 전송본 무결성 재검증 (전송 중 손상 여부 확인 — 로컬 원본의 SHA256SUMS 기준으로 NFS 사본을 검사)
+#      로컬이 이미 손상돼 있었다면 이 체크로는 못 잡지만, "전송 과정에서 깨졌는지"는 반드시 여기서 걸러야 함
+if ! (cd "${NFS_MOUNT}/${CHAIN_DIR}/${BACKUP_SUBDIR}" && sha256sum -c SHA256SUMS > /dev/null); then
+  log "NFS 전송본 무결성 검증 실패 — 전송 중 손상 가능성, 상태 갱신하지 않고 중단"
+  log "로컬 원본(${BACKUP_DIR})은 보존되며, 다음 실행 시 재전송을 위해 NFS 손상 사본을 삭제합니다."
+  rm -rf "${NFS_MOUNT}/${CHAIN_DIR}/${BACKUP_SUBDIR}"
+  exit 1
+fi
+log "NFS 전송본 무결성 검증 통과"
+
+# 8. NFS 검증까지 통과한 경우에만 상태 갱신 (여기서 실패하면 이 백업은 "없었던 일"로 처리 —
+#    다음 실행 시 GTID가 그대로이므로 재시도되거나, 그 사이 변경이 있었다면 새로 백업 시도)
+state_set chain_dir "${CHAIN_DIR}" last_backup_dir "${CHAIN_DIR}/${BACKUP_SUBDIR}" last_gtid "${CURRENT_GTID}"
+
+log "백업 작업 전체 완료 (${MODE})"

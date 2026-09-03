@@ -2,7 +2,7 @@
 # Owner: 김상희
 # Scope: Data, Storage & Recovery
 # Project: 石나가는 판단
-# Purpose: backup_transfer role default variables (이슈 #55)
+# Purpose: backup_transfer role default variables (이슈 #55, #114 Full+Incremental 체이닝 반영)
 
 mariadb_master_delegate_host: maxscale-01
 stone_game_db: stone_game
@@ -18,21 +18,35 @@ backup_transfer_nfs_mount_point: /mnt/nfs-db-backup
 
 backup_transfer_retention_days: 7
 
-backup_transfer_cron_hour: "2"
-backup_transfer_cron_minute: "0"
+# 이슈 #114: Full/Incremental 각각의 cron 스케줄로 분리
+# (기존 단일 backup_transfer_cron_hour/minute 는 제거 — schedule.yml에서 두 cron으로 대체)
+backup_transfer_full_cron_weekday: "0"     # 0 = 일요일 (cron weekday 표기)
+backup_transfer_full_cron_hour: "2"
+backup_transfer_full_cron_minute: "0"
+
+backup_transfer_incr_cron_weekday: "1-6"   # 월~토 (일요일 제외)
+backup_transfer_incr_cron_hour: "2"
+backup_transfer_incr_cron_minute: "0"
 
 backup_transfer_log_dir: /var/log/seokpan
 backup_transfer_credentials_file: /root/.backup_svc.cnf
+
+# 이슈 #55 당시 단일 Full 백업 스크립트 — #114 이후 cron에서는 참조하지 않으나
+# 코드/과거 백업본과의 호환을 위해 당분간 배포는 유지 (완전 제거는 별도 확인 후 진행)
 backup_transfer_script_path: /usr/local/sbin/seokpan_mariadb_backup.sh
+
+# 이슈 #114: Full+Incremental 체이닝 백업 스크립트
+backup_transfer_chain_script_path: /usr/local/sbin/seokpan_mariadb_backup_chain.sh
 
 # failover 전환 도중 read_only 상태가 일시적으로 불안정할 수 있어
 # 즉시 skip하지 않고 일정 간격으로 재확인 (최대 30분 대기 후 포기)
 backup_transfer_role_stabilize_max_retries: 6
 backup_transfer_role_stabilize_retry_interval_seconds: 300
 
-# 마지막 성공 백업 시점의 GTID 위치를 기록 — 그 이후 변경이 없으면 백업 스킵
-# (#114 Full+Incremental 체이닝과는 다른 개념: "변경 없으면 통째로 생략")
-backup_transfer_state_file: "{{ backup_transfer_local_base_dir }}/.last_backup_gtid"
+# 이슈 #114: 체인 상태(JSON)를 기록 — chain_dir(진행 중인 체인), last_backup_dir(다음
+# Incremental의 --incremental-basedir), last_gtid(변경 없으면 백업 자체 스킵, Full/Incremental 공통)
+# 파일명을 GTID 전용이던 기존(.last_backup_gtid)에서 의미에 맞게 변경
+backup_transfer_state_file: "{{ backup_transfer_local_base_dir }}/.backup_chain_state.json"
 
 # 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
 backup_restore_target_dir: /var/lib/mysql-restore-test
@@ -40,6 +54,11 @@ backup_restore_working_dir: /var/lib/mysql-restore-test-working
 backup_restore_socket: /var/lib/mysql-restore-test/mariadb-restore.sock
 backup_restore_port: 3307
   # PR #117 리뷰 반영으로 --skip-networking 적용, 현재 이 변수는 사용되지 않음 (향후 TCP 필요 시 대비해 유지)
+
+# 이슈 #114: 체인(Full+Incremental) 복구 전용 변수
+backup_restore_chain_dir: ""   # 예: chain_20260907_020000 (extra-vars 필수, mariadb_restore_chain.yml 실행 시 지정)
+backup_restore_chain_working_dir: /var/lib/mysql-restore-chain-working
+
 backup_restore_validation_tables:
   - member
   - member_stats
@@ -57,4 +76,3 @@ backup_restore_fk_checks:
   - { table: game_result, column: game_id, ref_table: game, ref_column: game_id }
   - { table: rating_history, column: member_id, ref_table: member, ref_column: member_id }
   - { table: rating_history, column: game_id, ref_table: game, ref_column: game_id }
-

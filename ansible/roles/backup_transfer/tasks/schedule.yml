@@ -2,12 +2,23 @@
 # Owner: 김상희
 # Scope: Data, Storage & Recovery
 # Project: 石나가는 판단
-# Purpose: Ansible + cron 스케줄 실행 방식 확정 (이슈 #55 코멘트 결정사항)
+# Purpose: Full+Incremental 체이닝 cron 스케줄 등록 (이슈 #114)
+#          - 일요일: Full, 그 외 요일: Incremental (동일 스크립트를 --mode 인자로 구분)
 
-- name: MariaDB Full 백업 cron 등록
+- name: MariaDB Full 백업 cron 등록 (일요일)
   ansible.builtin.cron:
-    name: "seokpan mariadb full backup"
-    minute: "{{ backup_transfer_cron_minute }}"
-    hour: "{{ backup_transfer_cron_hour }}"
-    job: "{{ backup_transfer_script_path }} >> {{ backup_transfer_log_dir }}/mariadb_backup_cron.log 2>&1"
+    name: "seokpan mariadb chain full backup"
+    weekday: "{{ backup_transfer_full_cron_weekday }}"
+    minute: "{{ backup_transfer_full_cron_minute }}"
+    hour: "{{ backup_transfer_full_cron_hour }}"
+    job: "{{ backup_transfer_chain_script_path }} full >> {{ backup_transfer_log_dir }}/mariadb_backup_cron.log 2>&1"
+    user: root
+
+- name: MariaDB Incremental 백업 cron 등록 (일요일 제외 매일)
+  ansible.builtin.cron:
+    name: "seokpan mariadb chain incremental backup"
+    weekday: "{{ backup_transfer_incr_cron_weekday }}"
+    minute: "{{ backup_transfer_incr_cron_minute }}"
+    hour: "{{ backup_transfer_incr_cron_hour }}"
+    job: "{{ backup_transfer_chain_script_path }} incr >> {{ backup_transfer_log_dir }}/mariadb_backup_cron.log 2>&1"
     user: root
