@@ -6,7 +6,8 @@
 # alias = 팀원들이 SSH 접속할 때 사용할 고정 별칭
 #
 # 실제 VM hostname과는 독립적으로 관리한다.
-# hostname이 변경되어도 alias는 그대로 사용할 수 있다.
+# 공식 Service/Platform Endpoint는 group_vars/all/vars.yml의
+# project_endpoints에서 별도 관리한다.
 # ============================================================
 
 common_host_entries:
@@ -16,8 +17,8 @@ common_host_entries:
   # ----------------------------------------------------------
 
   - ip: 10.1.93.71
-    alias: vr1  
-  
+    alias: vr1
+
   - ip: 192.168.51.20
     alias: cp1
 
@@ -48,7 +49,7 @@ common_host_entries:
   # ----------------------------------------------------------
   # Server-03
   # ----------------------------------------------------------
-  
+
   - ip: 10.1.93.75
     alias: vr3
 
@@ -57,9 +58,6 @@ common_host_entries:
 
   - ip: 192.168.53.40
     alias: ms1
-
-  - ip: 192.168.53.61
-    alias: harbor.seokpan.soldesk.store harbor hb
 
   - ip: 10.1.93.78
     alias: lb1
