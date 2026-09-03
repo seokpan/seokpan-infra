@@ -40,6 +40,8 @@
     validate_certs: false
     return_content: true
   register: harbor_gc_current
+  changed_when: false
+  check_mode: false
   no_log: true
 
 - name: Set fact - GC schedule already exists
@@ -103,6 +105,8 @@
     force_basic_auth: true
     validate_certs: false
   register: harbor_gc_verify
+  when: not ansible_check_mode
+  check_mode: false
   no_log: true
 
 - name: Assert GC schedule matches intended value
@@ -112,6 +116,7 @@
       - harbor_gc_verify.json.schedule.type == "Custom"
     fail_msg: >-
       GC 스케줄이 설정값과 다릅니다: {{ harbor_gc_verify.json.schedule | default('N/A') }}
+  when: not ansible_check_mode
 
 
 # ============================================================
@@ -126,3 +131,4 @@
       - "Next Scheduled Time = {{ harbor_gc_verify.json.schedule.next_scheduled_time | default('N/A') }}"
       - "Delete Untagged = {{ harbor_gc_delete_untagged }}"
       - "최초 생성 여부(이번 실행에서 POST 사용) = {{ not harbor_gc_schedule_exists }}"
+  when: not ansible_check_mode

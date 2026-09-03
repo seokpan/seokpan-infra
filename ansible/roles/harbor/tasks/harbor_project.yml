@@ -21,6 +21,8 @@
     validate_certs: false
     status_code: 200
   register: _harbor_existing_projects
+  changed_when: false
+  check_mode: false
 #  no_log: true
 
 - name: Project 존재 여부 판단
