@@ -130,7 +130,7 @@ LAST_BACKUP_DIR=$(state_get last_backup_dir)
 CURRENT_WEEK_START=$(date -d "-$(( $(date +%u) % 7 )) days" +%Y%m%d)
 CHAIN_VALID_THIS_WEEK=false
 if [ -n "${CHAIN_DIR}" ]; then
-  CHAIN_WEEK=$(printf '%s' "${CHAIN_DIR}" | sed -n 's/^chain_\([0-9]\{8\}\)_.*/\1/p')
+  CHAIN_WEEK=$(printf '%s' "${CHAIN_DIR}" | sed -n 's/^chain_\([0-9]\{8\}\)$/\1/p')
   if [ -n "${CHAIN_WEEK}" ] && [ "${CHAIN_WEEK}" -ge "${CURRENT_WEEK_START}" ]; then
     CHAIN_VALID_THIS_WEEK=true
   else
@@ -153,20 +153,27 @@ if [ -n "${LAST_GTID}" ] && [ "${CURRENT_GTID}" = "${LAST_GTID}" ]; then
   exit 0
 fi
 
-# 5. Incremental인데 이번 주 유효한 체인이 없으면 스킵 (지난 주 체인에 잘못 이어붙는 것 방지)
-if [ "${MODE}" = "incr" ] && [ "${CHAIN_VALID_THIS_WEEK}" != "true" ]; then
-  log "WARNING: 이번 주 유효한 chain 없음(Full 미실행 또는 스킵) — Incremental 스킵, RPO 저하 상태"
-  exit 0
-fi
-
 log "GTID 변경 감지: ${LAST_GTID:-<none>} -> ${CURRENT_GTID} — ${MODE} 백업을 진행합니다."
 
-# 6. 백업 대상 디렉터리 결정
+# 5. Incremental인데 이번 주 유효한 체인이 없으면 Full로 자동 승격 (이슈 #129 — RPO 개선)
+#    기존에는 이 경우 스킵했으나, 그러면 다음 정규 일요일까지 RPO 공백이 발생함.
+#    데이터 변경 자체는 위 GTID 비교로 이미 확인됐으므로, 지금 이 시점을 새 체인의
+#    시작점(Full)으로 승격시켜 즉시 캡처한다.
+CHAIN_ORIGIN="scheduled"
+if [ "${MODE}" = "incr" ] && [ "${CHAIN_VALID_THIS_WEEK}" != "true" ]; then
+  log "NOTICE: 예정된 Full 부재로 이번 Incremental 요청을 Full로 승격 처리"
+  MODE="full"
+  CHAIN_ORIGIN="promoted"
+fi
+
+# 6. 백업 대상 디렉터리 결정 (이슈 #129 — chain_<YYYYMMDD>, incr_<NN>_<타임스탬프>)
 if [ "${MODE}" = "full" ]; then
-  CHAIN_DIR="chain_${TIMESTAMP}"
+  CHAIN_DIR="chain_$(date +%Y%m%d)"
   BACKUP_SUBDIR="full_${TIMESTAMP}"
+  INCR_SEQ=0
 else
-  BACKUP_SUBDIR="incr_${TIMESTAMP}"
+  INCR_SEQ=$(( $(state_get incr_seq | grep -E '^[0-9]+$' || echo 0) + 1 ))
+  BACKUP_SUBDIR=$(printf 'incr_%02d_%s' "${INCR_SEQ}" "${TIMESTAMP}")
 fi
 
 BACKUP_DIR="${LOCAL_BASE_DIR}/${CHAIN_DIR}/${BACKUP_SUBDIR}"
@@ -220,6 +227,6 @@ log "NFS 전송본 무결성 검증 통과"
 
 # 10. NFS 검증까지 통과한 경우에만 상태 갱신 (여기서 실패하면 이 백업은 "없었던 일"로 처리 —
 #    다음 실행 시 GTID가 그대로이므로 재시도되거나, 그 사이 변경이 있었다면 새로 백업 시도)
-state_set chain_dir "${CHAIN_DIR}" last_backup_dir "${CHAIN_DIR}/${BACKUP_SUBDIR}" last_gtid "${CURRENT_GTID}"
+state_set chain_dir "${CHAIN_DIR}" last_backup_dir "${CHAIN_DIR}/${BACKUP_SUBDIR}" last_gtid "${CURRENT_GTID}" incr_seq "${INCR_SEQ}" chain_origin "${CHAIN_ORIGIN}"
 
 log "백업 작업 전체 완료 (${MODE})"
