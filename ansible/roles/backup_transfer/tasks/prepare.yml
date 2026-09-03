@@ -67,14 +67,6 @@
     mode: "0600"
   no_log: true
 
-- name: 백업 실행 스크립트 배포 (이슈 #55, 단일 Full — 당분간 공존)
-  ansible.builtin.template:
-    src: backup_full.sh.j2
-    dest: "{{ backup_transfer_script_path }}"
-    owner: root
-    group: root
-    mode: "0700"
-
 - name: Full+Incremental 체이닝 백업 스크립트 배포 (이슈 #114)
   ansible.builtin.template:
     src: backup_chain.sh.j2

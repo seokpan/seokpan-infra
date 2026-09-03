@@ -31,10 +31,6 @@ backup_transfer_incr_cron_minute: "0"
 backup_transfer_log_dir: /var/log/seokpan
 backup_transfer_credentials_file: /root/.backup_svc.cnf
 
-# 이슈 #55 당시 단일 Full 백업 스크립트 — #114 이후 cron에서는 참조하지 않으나
-# 코드/과거 백업본과의 호환을 위해 당분간 배포는 유지 (완전 제거는 별도 확인 후 진행)
-backup_transfer_script_path: /usr/local/sbin/seokpan_mariadb_backup.sh
-
 # 이슈 #114: Full+Incremental 체이닝 백업 스크립트
 backup_transfer_chain_script_path: /usr/local/sbin/seokpan_mariadb_backup_chain.sh
 
@@ -50,7 +46,6 @@ backup_transfer_state_file: "{{ backup_transfer_local_base_dir }}/.backup_chain_
 
 # 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
 backup_restore_target_dir: /var/lib/mysql-restore-test
-backup_restore_working_dir: /var/lib/mysql-restore-test-working
 backup_restore_socket: /var/lib/mysql-restore-test/mariadb-restore.sock
 backup_restore_port: 3307
   # PR #117 리뷰 반영으로 --skip-networking 적용, 현재 이 변수는 사용되지 않음 (향후 TCP 필요 시 대비해 유지)
