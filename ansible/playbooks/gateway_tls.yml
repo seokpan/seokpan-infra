@@ -1,0 +1,12 @@
+---
+# 작성자: 석판팀
+# Project: 石나가는 판단
+# Scope: Gateway TLS Certificate / Kubernetes TLS Secret Provider
+# 관련: seokpan-infra#111, seokpan-gitops#22
+
+- name: Provision Gateway TLS certificate and Kubernetes Secret
+  hosts: ansible_controller
+  become: true
+
+  roles:
+    - gateway_tls
