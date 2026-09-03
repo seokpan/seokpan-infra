@@ -1,0 +1,180 @@
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: 대상 백업 경로가 결정된 이후의 복구 실행 자동화 (이슈 #55, PR #117 리뷰 반영)
+#          - 어떤 백업으로/언제 복구할지 판단은 사람이 하고, backup_restore_source_dir로 넘긴다
+#          - 이 task는 그 이후의 무결성 검증 → --copy-back → 권한 복원 → 기동 → 표본 검증(Gate)까지 자동화한다
+
+- name: 단일 호스트 대상 여부 확인 (파괴적 작업 안전장치 — PR #117 리뷰 반영)
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length == 1
+    fail_msg: >-
+      이 playbook은 반드시 -l 옵션으로 정확히 1개 호스트를 지정해서 실행해야 합니다.
+      현재 대상: {{ ansible_play_hosts_all }}
+      예: ansible-playbook playbooks/mariadb_restore.yml -l mariadb-02 ...
+
+- name: 필수 변수 확인
+  ansible.builtin.assert:
+    that:
+      - backup_restore_source_dir is defined
+      - backup_restore_source_dir | length > 0
+    fail_msg: >-
+      backup_restore_source_dir(복구에 사용할 백업 경로)를 extra-vars로 반드시 지정할 것.
+      예: -e backup_restore_source_dir=/srv/nfs/db-backup/full_20260903_020000
+
+- name: 기존 복구 작업 디렉터리 정리
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ backup_restore_target_dir }}"
+    - "{{ backup_restore_working_dir }}"
+
+- name: 복구 대상/작업 디렉터리 준비
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: mysql
+    group: mysql
+    mode: "0750"
+  loop:
+    - "{{ backup_restore_target_dir }}"
+    - "{{ backup_restore_working_dir }}"
+
+- name: 백업본을 작업 디렉터리로 복사 (원본 백업본 보존을 위한 워킹 카피)
+  ansible.builtin.command: >
+    rsync -a --delete {{ backup_restore_source_dir }}/ {{ backup_restore_working_dir }}/
+  changed_when: true
+
+- name: 백업본 무결성 검증 (SHA256SUMS — PR #117 리뷰 반영, 불일치 시 즉시 실패)
+  ansible.builtin.command: sha256sum -c SHA256SUMS
+  args:
+    chdir: "{{ backup_restore_working_dir }}"
+  changed_when: false
+
+- name: mariadb-backup --copy-back 실행
+  ansible.builtin.command: >
+    mariadb-backup --copy-back
+    --target-dir={{ backup_restore_working_dir }}
+    --datadir={{ backup_restore_target_dir }}
+  changed_when: true
+
+- name: 데이터 디렉터리 소유권 복원
+  ansible.builtin.file:
+    path: "{{ backup_restore_target_dir }}"
+    state: directory
+    owner: mysql
+    group: mysql
+    recurse: true
+
+- name: 격리 인스턴스 systemd unit 배포
+  ansible.builtin.template:
+    src: mariadb-restore.service.j2
+    dest: /etc/systemd/system/mariadb-restore.service
+    mode: "0644"
+  notify: restore systemd daemon reload
+
+- name: systemd daemon-reload 즉시 반영
+  ansible.builtin.meta: flush_handlers
+
+- name: 격리 인스턴스 기동
+  ansible.builtin.systemd:
+    name: mariadb-restore
+    state: restarted
+    enabled: false
+
+- name: 인스턴스 기동 대기 (소켓 파일 생성 확인)
+  ansible.builtin.wait_for:
+    path: "{{ backup_restore_socket }}"
+    timeout: 60
+
+- name: 표본 테이블 Row Count 조회 (복구 인스턴스)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ backup_restore_socket }}"
+    login_user: root
+    query: "SELECT COUNT(*) AS cnt FROM {{ stone_game_db }}.{{ item }}"
+  loop: "{{ backup_restore_validation_tables }}"
+  register: backup_restore_counts
+
+- name: 표본 테이블 Row Count 조회 (운영 Master, 비교 기준)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "SELECT COUNT(*) AS cnt FROM {{ stone_game_db }}.{{ item }}"
+  loop: "{{ backup_restore_validation_tables }}"
+  delegate_to: "{{ mariadb_master_inventory_hostname }}"
+  register: backup_restore_live_counts
+
+- name: Count 일치 여부 Gate
+  ansible.builtin.assert:
+    that:
+      - item.0.query_result[0][0].cnt == item.1.query_result[0][0].cnt
+    fail_msg: >-
+      {{ item.0.item }} Count 불일치: 복구본={{ item.0.query_result[0][0].cnt }},
+      운영본={{ item.1.query_result[0][0].cnt }}
+    success_msg: >-
+      {{ item.0.item }} Count 일치: {{ item.0.query_result[0][0].cnt }}
+  loop: "{{ backup_restore_counts.results | zip(backup_restore_live_counts.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item }}"
+
+- name: 표본 테이블 CHECKSUM 조회 (복구 인스턴스, PK 포함 전체 행 내용 검증)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ backup_restore_socket }}"
+    login_user: root
+    query: "CHECKSUM TABLE {{ stone_game_db }}.{{ item }}"
+  loop: "{{ backup_restore_validation_tables }}"
+  register: backup_restore_checksums
+
+- name: 표본 테이블 CHECKSUM 조회 (운영 Master, 비교 기준)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "CHECKSUM TABLE {{ stone_game_db }}.{{ item }}"
+  loop: "{{ backup_restore_validation_tables }}"
+  delegate_to: "{{ mariadb_master_inventory_hostname }}"
+  register: backup_restore_live_checksums
+
+- name: PK 일치 여부 Gate (테이블 CHECKSUM 비교 — 행 유실/중복/변조까지 탐지)
+  ansible.builtin.assert:
+    that:
+      - item.0.query_result[0][0].Checksum == item.1.query_result[0][0].Checksum
+    fail_msg: >-
+      {{ item.0.item }} CHECKSUM 불일치(PK/행 데이터 상이): 복구본={{ item.0.query_result[0][0].Checksum }},
+      운영본={{ item.1.query_result[0][0].Checksum }}
+    success_msg: >-
+      {{ item.0.item }} CHECKSUM 일치: {{ item.0.query_result[0][0].Checksum }}
+  loop: "{{ backup_restore_checksums.results | zip(backup_restore_live_checksums.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item }}"
+
+- name: FK 참조 무결성 조회 (복구 인스턴스 — 고아 행 존재 여부)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ backup_restore_socket }}"
+    login_user: root
+    query: >-
+      SELECT COUNT(*) AS orphan_cnt FROM {{ stone_game_db }}.{{ item.table }} t
+      WHERE t.{{ item.column }} IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM {{ stone_game_db }}.{{ item.ref_table }} r
+          WHERE r.{{ item.ref_column }} = t.{{ item.column }}
+        )
+  loop: "{{ backup_restore_fk_checks }}"
+  loop_control:
+    label: "{{ item.table }}.{{ item.column }} -> {{ item.ref_table }}.{{ item.ref_column }}"
+  register: backup_restore_fk_orphans
+
+- name: FK 무결성 Gate (고아 행 0건이어야 통과)
+  ansible.builtin.assert:
+    that:
+      - item.query_result[0][0].orphan_cnt == 0
+    fail_msg: >-
+      {{ item.item.table }}.{{ item.item.column }} -> {{ item.item.ref_table }}.{{ item.item.ref_column }}
+      참조 무결성 위반: 고아 행 {{ item.query_result[0][0].orphan_cnt }}건
+    success_msg: >-
+      {{ item.item.table }}.{{ item.item.column }} -> {{ item.item.ref_table }}.{{ item.item.ref_column }}
+      참조 무결성 정상 (고아 행 0건)
+  loop: "{{ backup_restore_fk_orphans.results }}"
+  loop_control:
+    label: "{{ item.item.table }}.{{ item.item.column }}"
