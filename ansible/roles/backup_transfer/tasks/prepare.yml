@@ -14,6 +14,11 @@
     name: nfs-utils
     state: present
 
+- name: jq 패키지 설치 확인 (체인 상태 JSON 파싱용, 이슈 #114)
+  ansible.builtin.dnf:
+    name: jq
+    state: present
+
 - name: 로컬 백업 Base 디렉터리 생성
   ansible.builtin.file:
     path: "{{ backup_transfer_local_base_dir }}"
@@ -62,10 +67,18 @@
     mode: "0600"
   no_log: true
 
-- name: 백업 실행 스크립트 배포
+- name: 백업 실행 스크립트 배포 (이슈 #55, 단일 Full — 당분간 공존)
   ansible.builtin.template:
     src: backup_full.sh.j2
     dest: "{{ backup_transfer_script_path }}"
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Full+Incremental 체이닝 백업 스크립트 배포 (이슈 #114)
+  ansible.builtin.template:
+    src: backup_chain.sh.j2
+    dest: "{{ backup_transfer_chain_script_path }}"
     owner: root
     group: root
     mode: "0700"
