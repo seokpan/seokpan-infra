@@ -37,6 +37,8 @@
     validate_certs: false
     status_code: [200, 409]
   register: _harbor_existing_robots
+  changed_when: false
+  check_mode: false
   no_log: true   # 응답 자체에 민감정보는 없지만 습관적으로 최소 노출 원칙 적용
 
 - name: 기존 Robot Account 이름 목록 추출

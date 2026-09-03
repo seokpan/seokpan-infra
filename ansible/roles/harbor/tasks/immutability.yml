@@ -14,6 +14,8 @@
     validate_certs: false
     status_code: 200
   register: _harbor_immutability_project_lookup
+  changed_when: false
+  check_mode: false
   no_log: true
 
 - name: Harbor Project ID 확정
@@ -45,6 +47,8 @@
     validate_certs: false
     status_code: 200
   register: _harbor_immutability_rules
+  changed_when: false
+  check_mode: false
   no_log: true
 
 - name: 동일 범위 Immutability Rule 검색 초기화
@@ -146,12 +150,17 @@
     status_code: 200
   register: _harbor_immutability_rules_after
   no_log: true
-  when: harbor_immutability_enabled | bool
+  when: 
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode
+  check_mode: false
 
 - name: 활성 Immutability Rule 검증 초기화
   ansible.builtin.set_fact:
     _harbor_immutability_active_verified: false
-  when: harbor_immutability_enabled | bool
+  when: 
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode
 
 - name: 활성 Immutability Rule 검증
   ansible.builtin.set_fact:
@@ -161,6 +170,7 @@
     label: "{{ item.id | default('no-id') }}"
   when:
     - harbor_immutability_enabled | bool
+    - not ansible_check_mode
     - not (item.disabled | default(false) | bool)
     - item.action | default('') == 'immutable'
     - >-
@@ -182,4 +192,6 @@
       활성 상태로 확인되지 않았습니다.
     success_msg: >-
       Harbor Project '{{ harbor_project_name }}' Tag Immutability Rule 활성 상태 확인 완료.
-  when: harbor_immutability_enabled | bool
+  when: 
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode
