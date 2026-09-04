@@ -2,6 +2,28 @@
 # Owner: 김상희
 # Purpose: /etc/maxscale.cnf 배포. read_only는 enforce_read_only_slaves=true로
 #          MaxScale이 단독 관리 (mariadb custom.cnf에는 read_only 항목 자체가 없음)
+#          TLS(이슈 #102): tls_deploy role이 배포한 인증서/키를 MaxScale(maxscale
+#          유저)이 읽을 수 있도록 디렉터리·파일 권한을 보정한다. tls_deploy 자체는
+#          Harbor 등 다른 소비자를 위해 root:root로 배포하므로 여기서만 재조정.
+
+- name: TLS 인증서 상위 디렉터리 traverse 권한 보정 (/etc/pki/seokpan-ca 자체)
+  ansible.builtin.file:
+    path: "{{ maxscale_cert_path | dirname | dirname }}"
+    state: directory
+    mode: "0711"
+
+- name: TLS 인증서 디렉터리 권한 보정 (maxscale 유저 traverse 가능하도록)
+  ansible.builtin.file:
+    path: "{{ maxscale_cert_path | dirname }}"
+    state: directory
+    group: maxscale
+    mode: "0750"
+
+- name: TLS 개인키 권한 보정 (maxscale 유저 읽기 가능하도록)
+  ansible.builtin.file:
+    path: "{{ maxscale_key_path }}"
+    group: maxscale
+    mode: "0640"
 
 - name: maxscale.cnf 배포
   ansible.builtin.template:
@@ -12,3 +34,9 @@
     mode: "0640"
   notify: restart maxscale
   diff: false
+
+- name: 배포된 maxscale.cnf 유효성 검증 (재기동 전 사전 확인)
+  ansible.builtin.command: maxscale --config-check --config=/etc/maxscale.cnf
+  become_user: maxscale
+  changed_when: false
+  check_mode: false
