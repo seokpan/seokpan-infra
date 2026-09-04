@@ -303,7 +303,27 @@
   changed_when: false
   check_mode: false
 
+- name: Normalize current persistent routes
+  ansible.builtin.set_fact:
+    current_persistent_routes_normalized: >-
+      {{
+        current_persistent_routes.stdout.split(',')
+        | map('trim')
+        | reject('equalto', '')
+        | sort
+        | list
+      }}
 
+- name: Normalize desired persistent routes
+  ansible.builtin.set_fact:
+    desired_persistent_routes_normalized: >-
+      {{
+        desired_persistent_routes.split(',')
+        | map('trim')
+        | reject('equalto', '')
+        | sort
+        | list
+      }}
 # ============================================================
 # 12. Persistent Static Route 저장
 #
@@ -323,7 +343,7 @@
       - "{{ external_connection }}"
       - ipv4.routes
       - "{{ desired_persistent_routes }}"
-
+  when: current_persistent_routes_normalized != desired_persistent_routes_normalized
 
 # ============================================================
 # 13. Runtime Routing Table 최종 조회
