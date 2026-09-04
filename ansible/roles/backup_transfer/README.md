@@ -167,3 +167,66 @@ rm -rf /var/lib/mysql-restore-test /var/lib/mysql-restore-chain-working
 | #114 / PR #125 | Full+Incremental 체이닝 방식으로 확장 |
 | #128 / PR #130 | 레거시 단일 Full 백업/복구 코드 완전 제거 (체이닝으로 단일화) |
 | #129 / PR #131 | Incremental→Full 자동 승격, `chain_<날짜>`/`incr_<NN>_<타임스탬프>` 명명 규칙 도입 |
+
+## DR 복구본 운영 재개 반자동화 (이슈 #119, 신규)
+
+> ⚠️ **주의**: 위 "복구" 섹션은 여전히 `mariadb_restore.yml`/단일 Full 백업 시절 설명이
+> 남아있어 실제 코드(`restore_chain.yml`, 체인 기반)와 어긋나 있습니다. 이 문서 전체
+> 최신화는 별도로 진행 필요 — 이 섹션은 신규 추가분만 우선 반영합니다.
+
+위 "복구"(`mariadb_restore_chain.yml`, `restore_chain.yml`)는 **"백업본이 온전한지
+검증"**까지만 다룹니다(격리 인스턴스, `--skip-networking`). 실제로 서버가 죽어서
+그 백업으로 서비스를 되살려야 하는 상황에서는 `mariadb_dr_recovery.yml`을 사용합니다.
+
+**절대 한 번에 전부 실행되지 않습니다.** 4단계(Checkpoint)로 나뉘어 있고, `--tags`로
+한 단계씩만 실행됩니다. 각 단계 결과를 사람이 직접 확인한 뒤 다음 단계를 실행하세요.
+
+```bash
+# [4] 운영 datadir 복구 (완전 자동) — ⚠️ 대상 호스트의 /var/lib/mysql을 삭제 후 교체합니다
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags restore \
+  -e backup_restore_mode=production \
+  -e backup_restore_chain_dir=chain_<선택한_체인_타임스탬프>
+
+# [5] 복제 재구성 (반자동 — Master/Replica 역할은 사람이 판단해 지정)
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags replication \
+  -e backup_restore_role=replica
+  # Master 자동 판별 실패(양쪽 다 유실) 시에만 아래 추가:
+  # -e backup_restore_master_host=<살아있는_반대쪽_호스트_IP>
+
+# [6] MaxScale 재편입 확인 (확인만 자동, 신규 등록 아님)
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags maxscale_verify \
+  -e backup_restore_role=replica
+
+# [7] 서비스 재개 전 최종 체크리스트 출력 (자동 체크리스트, 서비스 재개 승인은 사람이 직접)
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags checklist \
+  -e backup_restore_role=replica
+```
+
+### [4]에서 격리 검증과 달라지는 점 (`backup_restore_mode: production`)
+
+| 항목 | isolated(기존, 기본값) | production(신규) |
+|---|---|---|
+| 대상 디렉터리 | `/var/lib/mysql-restore-test` | 실제 운영 `/var/lib/mysql` |
+| 기존 데이터 처리 | 삭제 후 재생성 | **동일 — 보존 없이 즉시 삭제 후 재생성**(팀 결정) |
+| 기동 서비스 | 임시 `mariadb-restore.service`(포트 3307, `--skip-networking`) | 정식 `mariadb.service` |
+| Count/PK/FK Gate | `assert`(불일치 시 Play 실패) | **정보성 리포트로 전환**(지난 백업 시점과 현재 운영 Master 사이의 정상적 데이터 간극 때문 — [5]가 이후 따라잡음). SHA256SUMS 무결성 검증은 두 모드 모두 하드 Gate 유지 |
+
+### [7] R/W 헬스체크가 영구 테이블을 쓰지 않는 이유
+
+`stone_game`의 테이블 스키마는 Backend Alembic Migration이 유일한 기준으로 이미
+확정되어 있습니다(이슈 #89 코멘트). 이 헬스체크는 영구 테이블을 신설하는 대신
+**`CREATE TEMPORARY TABLE`**을 사용해 커넥션 종료 시 자동 삭제되도록 했습니다 —
+Alembic 관리 스키마와 완전히 무관하며 별도 정리도 필요 없습니다. 전용 계정
+(`dr_healthcheck_svc`)은 `CREATE TEMPORARY TABLES` 권한만 가지고 있습니다.
+
+**신규 Vault 변수 추가 필요**: `dr_healthcheck_svc_password` — 다른 5개 계정과
+동일한 방식으로 `ansible-vault edit group_vars/all/vault.yml`에 추가할 것.
+
+### 신규 계정 안내
+
+`dr_healthcheck_svc` 계정을 이 이슈에서 신설했습니다(영구 테이블 접근 권한 없음,
+`CREATE TEMPORARY TABLES`만 보유).
