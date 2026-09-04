@@ -4,7 +4,7 @@
 # 목적: Chrony/NTP 상태 점검 및 조건부 시간 동기화 자동화
 
 - name: Check and remediate Chrony NTP synchronization
-  hosts: all:!harbor
+  hosts: all
   gather_facts: false
 
   roles:
