@@ -41,11 +41,10 @@
       예: -e backup_restore_chain_dir=chain_20260907_020000 -e backup_restore_mode=production
 
 - name: production 모드 착수 경고 (운영 datadir를 직접 건드림 — 최종 확인 로그)
-  # PR #133 리뷰 반영: 보존 여부를 하드코딩된 삭제가 아니라
-  # backup_restore_preserve_corrupted_datadir 변수로 제어. 현재(false, 기본값)는
-  # 실 서비스 트래픽이 없는 개발 단계라 datadir 내용 전체가 테스트 데이터이므로
-  # 보존 실익이 없다는 팀 결정에 따른 것. 실 서비스 데이터가 쌓이기 시작하는 시점
-  # (H_progress_checklist.md F-5 정리 완료 이후)에는 반드시 true로 전환해야 한다.
+  # PR #133 2차 리뷰 반영, 이슈 #119 코멘트로 결정 기록(2026-09-04): 보존 여부를
+  # backup_restore_preserve_corrupted_datadir 변수로 제어하며 기본값은 true(보존).
+  # 개발 단계 누적 데이터는 가치가 없어 별도로 직접 정리했고, 전환 시점을 F-5
+  # 완료 이후로 미루지 않고 지금으로 앞당김 — 이슈 #119 원본 계약과 일치.
   ansible.builtin.debug:
     msg: >-
       ⚠️ backup_restore_mode=production — 대상 호스트({{ inventory_hostname }})의

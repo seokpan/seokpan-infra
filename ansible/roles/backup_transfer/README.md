@@ -167,7 +167,7 @@ rm -rf /var/lib/mysql-restore-chain-working
 | `backup_restore_validation_tables` | 7개 테이블 | 표본 검증 대상 (member, member_stats, game, game_participant, move, game_result, rating_history) |
 | `backup_restore_fk_checks` | 7개 관계 | FK 무결성 Gate 대상 (`stone_game_schema_v1.sql` 기준) |
 | `backup_restore_port` | 3307 | (참고용, 현재 `--skip-networking`으로 미사용 — 향후 TCP 필요 시 대비해 유지) |
-| `backup_restore_preserve_corrupted_datadir` | `false` | 기존 datadir 보존 여부. F-5(실 서비스 오픈 전 정리) 완료 후 `true`로 전환 필수 |
+| `backup_restore_preserve_corrupted_datadir` | `true` | 기존 datadir 보존 여부(이슈 #119 결정 기록, 2026-09-04 전환 완료) |
 | `mariadb_monitor_name` | `MariaDB-Monitor` | `maxctrl call command mariadbmon failover` 대상 모니터명 |
 | `dr_failsafe_read_only_cnf_path` | `/etc/my.cnf.d/zz-dr-failsafe-read-only.cnf` | Split-brain 방지 임시 안전장치 파일 경로 |
 
@@ -223,7 +223,7 @@ ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --as
 | 항목 | isolated(기존, 기본값) | production(신규) |
 |---|---|---|
 | 대상 디렉터리 | `/var/lib/mysql-restore-test` | 실제 운영 `/var/lib/mysql` |
-| 기존 데이터 처리 | 삭제 후 재생성 | `backup_restore_preserve_corrupted_datadir` 변수로 제어(기본 `false`=즉시 삭제, `true`=`.corrupted.<timestamp>` 보존 후 교체). **실 서비스 데이터가 쌓이는 시점(F-5 정리 이후)에는 반드시 `true`로 전환** |
++| 기존 데이터 처리 | 삭제 후 재생성 | `backup_restore_preserve_corrupted_datadir` 변수로 제어(기본 `true`=`.corrupted.<timestamp>` 보존 후 교체, `false`=즉시 삭제). 이슈 #119 코멘트로 결정 기록, 전환 완료(2026-09-04) |
 | 기동 서비스 | 임시 `mariadb-restore.service`(포트 3307, `--skip-networking`) | 정식 `mariadb.service` |
 | Count/PK/FK Gate | `assert`(불일치 시 Play 실패) | **정보성 리포트로 전환**(지난 백업 시점과 현재 운영 Master 사이의 정상적 데이터 간극 때문 — [5]가 이후 따라잡음). SHA256SUMS 무결성 검증은 두 모드 모두 하드 Gate 유지 |
 
