@@ -2,7 +2,8 @@
 # Owner: 김상희
 # Scope: Data, Storage & Recovery
 # Project: 石나가는 판단
-# Purpose: backup_transfer role default variables (이슈 #55, #114 Full+Incremental 체이닝 반영)
+# Purpose: backup_transfer role default variables (이슈 #55, #114 Full+Incremental 체이닝,
+#          이슈 #119 DR 운영 재개 반자동화 반영)
 
 mariadb_master_delegate_host: maxscale-01
 stone_game_db: stone_game
@@ -71,3 +72,63 @@ backup_restore_fk_checks:
   - { table: game_result, column: game_id, ref_table: game, ref_column: game_id }
   - { table: rating_history, column: member_id, ref_table: member, ref_column: member_id }
   - { table: rating_history, column: game_id, ref_table: game, ref_column: game_id }
+
+# ────────────────────────────────────────────────────────────────
+# 이슈 #119: DR 복구본 운영 재개 반자동화
+# ────────────────────────────────────────────────────────────────
+
+# [4] backup_restore_mode: isolated(기존, 기본값) | production(신규)
+#     - isolated: 기존 #55/#114 동작 그대로(격리 검증용, 변경 없음)
+#     - production: 실제 운영 datadir(mariadb_datadir)로 복구, 정식 mariadb 서비스 기동
+#     반드시 extra-vars로 명시 지정(-e backup_restore_mode=production) — 기본값이
+#     운영에 잘못 적용되는 사고를 막기 위해 기본은 항상 isolated로 고정.
+backup_restore_mode: isolated
+
+# 실제 운영 datadir/서비스명 (RHEL 계열 MariaDB 공식 repo 패키지 기준 기본값,
+# mariadb role의 handlers/main.yml "restart mariadb"와 동일 서비스를 가리킴)
+mariadb_datadir: /var/lib/mysql
+mariadb_service_name: mariadb
+
+# PR #133 2차 리뷰 반영, 이슈 #119 코멘트로 결정 기록·전환 완료(2026-09-04):
+# 기존 운영 datadir 보존 여부. 원래는 F-5(실 서비스 오픈 전 정리) 완료 이후로
+# 전환할 계획이었으나, 그 시점을 기다릴 이유가 없다고 판단 — 현재 누적된
+# 백업/테스트 데이터는 보존 가치가 없어 F-5 절차를 앞당겨 직접 삭제하고, 코드
+# 기본값은 지금 바로 true로 전환. 이슈 #119 원본 계약(항상 .corrupted.<timestamp>
+# 보존)과 이제 일치하며, 이후 전환 누락 리스크 자체가 사라짐. 실측 완료(#119 코멘트).
+backup_restore_preserve_corrupted_datadir: true
+
+# 이슈 #119, PR #133 리뷰 반영: MariaDB-Monitor failover 강제 트리거용 모니터명
+# (maxscale.cnf 기준, detect_master.yml 출력의 마지막 컬럼과 동일)
+mariadb_monitor_name: MariaDB-Monitor
+
+# [5] 복제 재구성(replication_setup.yml)
+# backup_restore_role: master|replica — extra-vars 필수 지정, 기본값 없음(실수 방지)
+backup_restore_role: ""
+# Master 접속 정보 — 우선 detect_master.yml(maxctrl list servers)로 자동 판별을 시도하고,
+# 판별 실패(양쪽 다 유실된 최악의 시나리오)한 경우에만 사람이 아래 값을 extra-vars로 지정해야 함.
+# 평소에는 빈 값 유지(자동 판별 우선 원칙).
+backup_restore_master_host: ""
+backup_restore_master_port: 3306
+
+# [7] service_checklist.yml — Common VIP 경유 R/W 헬스체크(임시 테이블 방식)
+# E_infra_snapshot.md 1절 기준 Common VIP. 이슈 #102(VIP 리스너 TLS 미설정)가 아직
+# open이라 MariaDB 클라이언트 --skip-ssl 워크어라운드를 함께 사용해야 함.
+common_vip_host: 10.1.93.90
+common_vip_port: 3306
+dr_healthcheck_credentials_file: /root/.dr_healthcheck_svc.cnf
+
+# PR #133 리뷰 반영(2026-09-04): Split-brain 방지 임시 안전장치 파일 경로.
+# role=master로 새 Master가 확립되면 같은 mariadbs 그룹의 나머지 호스트에 이 파일을
+# 미리 배치해, 그 호스트가 나중에 복제 설정 없이 그냥 기동되어도 read_only=1로
+# 부팅되도록 강제(고립 Master로 오판정되는 것 방지). zz- 접두사로 파일명을 지정해
+# custom.cnf(이슈 #50)보다 항상 나중에 읽히도록 함. role=replica로 정상 재편입되면
+# replication_setup.yml이 자동으로 제거함.
+dr_failsafe_read_only_cnf_path: /etc/my.cnf.d/zz-dr-failsafe-read-only.cnf
+# PR #133 3차 리뷰 반영(2026-09-04): Split-brain 방지 안전장치 배치 시, 도달
+# 불가(unreachable) 호스트를 자동으로 안전하다고 간주하지 않기 위한 명시적
+# 확인 목록. unreachable은 서버가 실제로 꺼져 있다는 보장이 아니므로(일시적
+# SSH/네트워크 장애일 수 있음), 사람이 직접 확인·fencing한 호스트 이름만
+# 여기 나열해야 해당 호스트에 한해 [6] Gate를 통과한다. 평소에는 빈 배열 유지 —
+# 실행할 때마다 extra-vars로 그때그때 확인한 호스트만 넘길 것(기본값에
+# 상시 등록하지 말 것).
+backup_restore_fenced_hosts: []

@@ -11,6 +11,14 @@
 #            프로젝트 11.8.9 포함) 완전히 제거됨(실서버 검증 중 unknown option 확인,
 #            2026-09-03) — Full을 먼저 단독 --prepare한 뒤 각 Incremental을 순서대로
 #            --incremental-dir로 반복 --prepare하는 절차로 단순화
+#
+#          [이슈 #119, 2026-09-04 추가] backup_restore_mode: isolated|production 분기
+#          - isolated: 기존 동작 100% 그대로(격리 테스트 경로, 임시 systemd unit,
+#            Count/PK/FK를 assert로 하드 Gate) — 변경 없음
+#          - production: 실제 운영 datadir/서비스로 복구. 지난 백업 시점과 현재 운영
+#            Master 사이에는 정상적인 데이터 간극이 존재(이후 [5] 복제 재구성이 따라
+#            잡을 대상)하므로 Count/PK/FK는 assert가 아닌 정보성 리포트로 전환한다.
+#            SHA256SUMS 무결성(백업 파일 자체 손상 여부)은 두 모드 모두 하드 Gate 유지.
 
 - name: 단일 호스트 대상 여부 확인 (파괴적 작업 안전장치)
   ansible.builtin.assert:
@@ -25,17 +33,62 @@
     that:
       - backup_restore_chain_dir is defined
       - backup_restore_chain_dir | length > 0
+      - backup_restore_mode in ['isolated', 'production']
     fail_msg: >-
       backup_restore_chain_dir(복구할 체인 디렉터리명)를 extra-vars로 반드시 지정할 것.
-      예: -e backup_restore_chain_dir=chain_20260907_020000
+      backup_restore_mode는 isolated 또는 production 중 하나여야 함(현재:
+      {{ backup_restore_mode }}).
+      예: -e backup_restore_chain_dir=chain_20260907_020000 -e backup_restore_mode=production
 
-- name: 기존 체인 복구 작업 디렉터리 정리
+- name: production 모드 착수 경고 (운영 datadir를 직접 건드림 — 최종 확인 로그)
+  # PR #133 2차 리뷰 반영, 이슈 #119 코멘트로 결정 기록(2026-09-04): 보존 여부를
+  # backup_restore_preserve_corrupted_datadir 변수로 제어하며 기본값은 true(보존).
+  # 개발 단계 누적 데이터는 가치가 없어 별도로 직접 정리했고, 전환 시점을 F-5
+  # 완료 이후로 미루지 않고 지금으로 앞당김 — 이슈 #119 원본 계약과 일치.
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ backup_restore_mode=production — 대상 호스트({{ inventory_hostname }})의
+      실제 운영 datadir({{ mariadb_datadir }})를 이 백업으로 교체합니다.
+      {{ '기존 데이터는 .corrupted.<timestamp>로 보존됩니다.'
+         if backup_restore_preserve_corrupted_datadir
+         else '기존 데이터는 보존 없이 즉시 삭제됩니다(개발 단계 테스트 데이터 기준 —
+         backup_restore_preserve_corrupted_datadir=false, 이슈 #119 PR #133).' }}
+  when: backup_restore_mode == 'production'
+
+# ── 모드별 대상 경로/소켓 계산 (이하 태스크에서 공통으로 사용) ──────────────────
+
+- name: 모드별 대상 디렉터리/소켓 계산
+  ansible.builtin.set_fact:
+    backup_restore_effective_target_dir: >-
+      {{ mariadb_datadir if backup_restore_mode == 'production' else backup_restore_target_dir }}
+    backup_restore_effective_socket: >-
+      {{ mariadb_socket_path if backup_restore_mode == 'production' else backup_restore_socket }}
+
+- name: production 모드 — 복구 전 mariadb 서비스 정지 (운영 datadir 교체를 위해 필수)
+  ansible.builtin.systemd:
+    name: "{{ mariadb_service_name }}"
+    state: stopped
+  when: backup_restore_mode == 'production'
+
+- name: 체인 롤포워드 워킹 디렉터리 정리 (항상 즉시 삭제 — 일회성 작업 공간, 보존 대상 아님)
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: "{{ backup_restore_chain_working_dir }}"
     state: absent
-  loop:
-    - "{{ backup_restore_target_dir }}"
-    - "{{ backup_restore_chain_working_dir }}"
+
+- name: "기존 운영 datadir 보존 후 교체 (backup_restore_preserve_corrupted_datadir=true인 경우만)"
+  # PR #133 리뷰 반영: 실 서비스 데이터가 쌓인 이후에는 이 분기가 반드시 타야 한다.
+  ansible.builtin.command: >
+    mv {{ backup_restore_effective_target_dir }}
+    {{ backup_restore_effective_target_dir }}.corrupted.{{ ansible_date_time.iso8601_basic_short }}
+  args:
+    removes: "{{ backup_restore_effective_target_dir }}"
+  when: backup_restore_mode == 'production' and backup_restore_preserve_corrupted_datadir
+
+- name: "기존 datadir 즉시 삭제 (개발 단계 테스트 데이터 기준 기본 동작 — isolated 모드 및 production+미보존)"
+  ansible.builtin.file:
+    path: "{{ backup_restore_effective_target_dir }}"
+    state: absent
+  when: not (backup_restore_mode == 'production' and backup_restore_preserve_corrupted_datadir)
 
 - name: 체인 복구 작업 디렉터리 준비
   ansible.builtin.file:
@@ -45,7 +98,7 @@
     group: mysql
     mode: "0750"
   loop:
-    - "{{ backup_restore_target_dir }}"
+    - "{{ backup_restore_effective_target_dir }}"
     - "{{ backup_restore_chain_working_dir }}"
 
 - name: NFS 백업 경로에서 체인 전체를 작업 디렉터리로 복사 (원본 보존을 위한 워킹 카피)
@@ -84,7 +137,7 @@
       체인의 첫 구성요소가 Full 백업이 아닙니다: {{ backup_restore_chain_sorted[0] }}
       (Full 없이는 이 체인을 복구할 수 없습니다.)
 
-- name: 각 구성요소 무결성 검증 (SHA256SUMS — 롤포워드 이전 raw 상태 기준)
+- name: 각 구성요소 무결성 검증 (SHA256SUMS — 롤포워드 이전 raw 상태 기준, 모드 무관 항상 하드 Gate)
   ansible.builtin.command: sha256sum -c SHA256SUMS
   args:
     chdir: "{{ backup_restore_chain_working_dir }}/{{ item }}"
@@ -109,63 +162,97 @@
   loop: "{{ backup_restore_chain_sorted[1:] }}"
   changed_when: true
 
-# --- 이 시점부터는 restore.yml의 --copy-back 이후 로직과 동일 (의도적 중복 —
-#     롤포워드 이전 SHA256SUMS 기준 검증과 섞이지 않도록 restore.yml을 호출하지 않음) ---
+# --- 이 시점부터는 (기존 restore.yml 계승) --copy-back 이후 로직 — 모드별로 분기 ---
 
 - name: mariadb-backup --copy-back 실행 (롤포워드 완료된 Full 디렉터리 기준)
   ansible.builtin.command: >
     mariadb-backup --copy-back
     --target-dir={{ backup_restore_chain_working_dir }}/{{ backup_restore_chain_sorted[0] }}
-    --datadir={{ backup_restore_target_dir }}
+    --datadir={{ backup_restore_effective_target_dir }}
   changed_when: true
 
 - name: 데이터 디렉터리 소유권 복원
   ansible.builtin.file:
-    path: "{{ backup_restore_target_dir }}"
+    path: "{{ backup_restore_effective_target_dir }}"
     state: directory
     owner: mysql
     group: mysql
     recurse: true
 
-- name: 격리 인스턴스 systemd unit 배포
+# ── isolated 모드: 기존 임시 systemd unit 기동 (변경 없음) ─────────────────────
+
+- name: "[isolated] 격리 인스턴스 systemd unit 배포"
   ansible.builtin.template:
     src: mariadb-restore.service.j2
     dest: /etc/systemd/system/mariadb-restore.service
     mode: "0644"
   notify: restore systemd daemon reload
+  when: backup_restore_mode == 'isolated'
 
-- name: systemd daemon-reload 즉시 반영
+- name: "[isolated] systemd daemon-reload 즉시 반영"
   ansible.builtin.meta: flush_handlers
+  when: backup_restore_mode == 'isolated'
 
-- name: 격리 인스턴스 기동
+- name: "[isolated] 격리 인스턴스 기동"
   ansible.builtin.systemd:
     name: mariadb-restore
     state: restarted
     enabled: false
+  when: backup_restore_mode == 'isolated'
 
-- name: 인스턴스 기동 대기 (소켓 파일 생성 확인)
+- name: "[isolated] 인스턴스 기동 대기 (소켓 파일 생성 확인)"
   ansible.builtin.wait_for:
-    path: "{{ backup_restore_socket }}"
+    path: "{{ backup_restore_effective_socket }}"
     timeout: 60
+  when: backup_restore_mode == 'isolated'
+
+# ── production 모드: 정식 mariadb 서비스 기동 (이슈 #119 [4] 신규) ─────────────
+
+- name: "[production] 정식 mariadb 서비스 기동"
+  ansible.builtin.systemd:
+    name: "{{ mariadb_service_name }}"
+    state: restarted
+    enabled: true
+  when: backup_restore_mode == 'production'
+
+- name: "[production] 서비스 기동 대기 (소켓 파일 생성 확인)"
+  ansible.builtin.wait_for:
+    path: "{{ backup_restore_effective_socket }}"
+    timeout: 60
+  when: backup_restore_mode == 'production'
+
+# ── 표본 검증 조회 (Count/CHECKSUM/FK) — 모드 무관 항상 조회는 수행 ────────────
 
 - name: 표본 테이블 Row Count 조회 (복구 인스턴스)
   ansible.mariadb.mariadb_query:
-    login_unix_socket: "{{ backup_restore_socket }}"
+    login_unix_socket: "{{ backup_restore_effective_socket }}"
     login_user: root
     query: "SELECT COUNT(*) AS cnt FROM {{ stone_game_db }}.{{ item }}"
   loop: "{{ backup_restore_validation_tables }}"
   register: backup_restore_counts
 
 - name: 표본 테이블 Row Count 조회 (운영 Master, 비교 기준)
+  # PR #133 리뷰 반영: Master 자동 판별에 성공했을 때만 실행. 양쪽 다 유실되어
+  # detect_master_resilient.yml에서 mariadb_master_detected=false로 기록된
+  # 경우(production 모드)에는 비교 대상 자체가 없으므로 스킵.
+  # delegate_to에 default(inventory_hostname) fallback 필수: when이 loop 태스크의
+  # delegate_to 템플릿 렌더링보다 나중에 평가되어, mariadb_master_inventory_hostname이
+  # undefined인 상태로 delegate_to를 먼저 렌더링하려다 실패하는 문제 실측 확인
+  # (2026-09-04, Master 0개 시나리오 검증 중). when이 false면 이 태스크 자체는 어차피
+  # 실행 안 되므로 fallback 값이 무엇이든 실제 쿼리에는 영향 없음.
   ansible.mariadb.mariadb_query:
     login_unix_socket: "{{ mariadb_socket_path }}"
     login_user: root
     query: "SELECT COUNT(*) AS cnt FROM {{ stone_game_db }}.{{ item }}"
   loop: "{{ backup_restore_validation_tables }}"
-  delegate_to: "{{ mariadb_master_inventory_hostname }}"
+  delegate_to: "{{ mariadb_master_inventory_hostname | default(inventory_hostname) }}"
   register: backup_restore_live_counts
+  when: mariadb_master_detected | default(true)
+  # production 모드에서 이 host 자신이 복구 대상이자 동시에 detect_master 결과일 수
+  # 있음(예: 유일하게 살아있던 서버가 이미 Master로 판별된 상태) — 그 경우 자기 자신과
+  # 자기 자신을 비교하게 되어 항상 100% 일치하므로 의미 있는 비교가 아님을 인지할 것.
 
-- name: Count 일치 여부 Gate
+- name: "[isolated] Count 일치 여부 Gate (하드 실패)"
   ansible.builtin.assert:
     that:
       - item.0.query_result[0][0].cnt == item.1.query_result[0][0].cnt
@@ -177,10 +264,33 @@
   loop: "{{ backup_restore_counts.results | zip(backup_restore_live_counts.results) | list }}"
   loop_control:
     label: "{{ item.0.item }}"
+  when: backup_restore_mode == 'isolated'
+  # isolated 모드는 detect_master_resilient.yml에서 판별 실패 시 이미 하드 실패로
+  # 처리되므로(mariadb_master_detected=false로 여기까지 못 옴), 별도 가드 불필요.
+
+- name: "[production] Master 미검출 — Count 비교 스킵 안내"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item }}: 복구본={{ (backup_restore_counts.results | selectattr('item', 'equalto', item) | first).query_result[0][0].cnt }},
+      운영본=N/A(Master 미검출로 비교 대상 없음)
+  loop: "{{ backup_restore_validation_tables }}"
+  when: backup_restore_mode == 'production' and not (mariadb_master_detected | default(true))
+
+- name: "[production] Count 비교 결과 (정보성 리포트 — 실패 처리 안 함)"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.0.item }}: 복구본={{ item.0.query_result[0][0].cnt }},
+      운영본(비교 참고용)={{ item.1.query_result[0][0].cnt }}
+      {{ '(일치)' if item.0.query_result[0][0].cnt == item.1.query_result[0][0].cnt
+         else '(차이 있음 — [5] 복제 재구성으로 따라잡을 정상 범위인지 사람이 판단할 것)' }}
+  loop: "{{ backup_restore_counts.results | zip(backup_restore_live_counts.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item }}"
+  when: backup_restore_mode == 'production' and mariadb_master_detected | default(true)
 
 - name: 표본 테이블 CHECKSUM 조회 (복구 인스턴스, PK 포함 전체 행 내용 검증)
   ansible.mariadb.mariadb_query:
-    login_unix_socket: "{{ backup_restore_socket }}"
+    login_unix_socket: "{{ backup_restore_effective_socket }}"
     login_user: root
     query: "CHECKSUM TABLE {{ stone_game_db }}.{{ item }}"
   loop: "{{ backup_restore_validation_tables }}"
@@ -192,10 +302,19 @@
     login_user: root
     query: "CHECKSUM TABLE {{ stone_game_db }}.{{ item }}"
   loop: "{{ backup_restore_validation_tables }}"
-  delegate_to: "{{ mariadb_master_inventory_hostname }}"
+  delegate_to: "{{ mariadb_master_inventory_hostname | default(inventory_hostname) }}"
   register: backup_restore_live_checksums
+  when: mariadb_master_detected | default(true)
 
-- name: PK 일치 여부 Gate (테이블 CHECKSUM 비교 — 행 유실/중복/변조까지 탐지)
+- name: "[production] Master 미검출 — CHECKSUM 비교 스킵 안내"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item }}: 복구본={{ (backup_restore_checksums.results | selectattr('item', 'equalto', item) | first).query_result[0][0].Checksum }},
+      운영본=N/A(Master 미검출로 비교 대상 없음)
+  loop: "{{ backup_restore_validation_tables }}"
+  when: backup_restore_mode == 'production' and not (mariadb_master_detected | default(true))
+
+- name: "[isolated] PK 일치 여부 Gate (CHECKSUM 비교 — 하드 실패)"
   ansible.builtin.assert:
     that:
       - item.0.query_result[0][0].Checksum == item.1.query_result[0][0].Checksum
@@ -207,10 +326,23 @@
   loop: "{{ backup_restore_checksums.results | zip(backup_restore_live_checksums.results) | list }}"
   loop_control:
     label: "{{ item.0.item }}"
+  when: backup_restore_mode == 'isolated'
 
-- name: FK 참조 무결성 조회 (복구 인스턴스 — 고아 행 존재 여부)
+- name: "[production] CHECKSUM 비교 결과 (정보성 리포트 — 실패 처리 안 함)"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.0.item }}: 복구본={{ item.0.query_result[0][0].Checksum }},
+      운영본(비교 참고용)={{ item.1.query_result[0][0].Checksum }}
+      {{ '(일치)' if item.0.query_result[0][0].Checksum == item.1.query_result[0][0].Checksum
+         else '(차이 있음 — [5] 복제 재구성으로 따라잡을 정상 범위인지 사람이 판단할 것)' }}
+  loop: "{{ backup_restore_checksums.results | zip(backup_restore_live_checksums.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item }}"
+  when: backup_restore_mode == 'production' and mariadb_master_detected | default(true)
+
+- name: FK 참조 무결성 조회 (복구 인스턴스 — 고아 행 존재 여부, 모드 무관 자체 무결성이므로 항상 하드 Gate)
   ansible.mariadb.mariadb_query:
-    login_unix_socket: "{{ backup_restore_socket }}"
+    login_unix_socket: "{{ backup_restore_effective_socket }}"
     login_user: root
     query: >-
       SELECT COUNT(*) AS orphan_cnt FROM {{ stone_game_db }}.{{ item.table }} t
@@ -224,7 +356,7 @@
     label: "{{ item.table }}.{{ item.column }} -> {{ item.ref_table }}.{{ item.ref_column }}"
   register: backup_restore_fk_orphans
 
-- name: FK 무결성 Gate (고아 행 0건이어야 통과)
+- name: FK 무결성 Gate (고아 행 0건이어야 통과 — 백업본 자체의 내부 정합성이므로 모드 무관 항상 하드 Gate)
   ansible.builtin.assert:
     that:
       - item.query_result[0][0].orphan_cnt == 0
@@ -237,3 +369,23 @@
   loop: "{{ backup_restore_fk_orphans.results }}"
   loop_control:
     label: "{{ item.item.table }}.{{ item.item.column }}"
+
+- name: "[production] 다음 단계 안내 (Master 검출됨 — 일반적인 단일 서버 유실 시나리오)"
+  ansible.builtin.debug:
+    msg: >-
+      [4] 운영 datadir 복구 완료. 다음 Checkpoint: --tags replication 으로
+      backup_restore_role(master|replica)을 지정해 복제를 재구성하세요.
+      예: ansible-playbook playbooks/mariadb_dr_recovery.yml -l {{ inventory_hostname }}
+      --tags replication --ask-vault-pass -e backup_restore_role=replica
+  when: backup_restore_mode == 'production' and mariadb_master_detected | default(true)
+
+- name: "[production] 다음 단계 안내 (Master 미검출 — 양쪽 다 유실된 최악의 시나리오)"
+  ansible.builtin.debug:
+    msg: >-
+      [4] 운영 datadir 복구 완료(비교 대상 Master 없음 — SHA256SUMS/FK Gate만 통과).
+      다음 Checkpoint: --tags replication 에 반드시
+      backup_restore_role=master 를 지정하세요(replica 아님 — 살아있는 Master가
+      없으므로 이 서버가 새 Master가 되어야 합니다).
+      예: ansible-playbook playbooks/mariadb_dr_recovery.yml -l {{ inventory_hostname }}
+      --tags replication --ask-vault-pass -e backup_restore_role=master
+  when: backup_restore_mode == 'production' and not (mariadb_master_detected | default(true))

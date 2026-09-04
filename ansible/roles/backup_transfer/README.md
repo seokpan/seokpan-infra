@@ -114,9 +114,18 @@ ansible-playbook playbooks/mariadb_restore_chain.yml -l <복구를_수행할_호
 실수 방지를 위해 자동화에 넣지 않았습니다.
 
 ```bash
+# [isolated] 격리 인스턴스 자체를 정리하는 경우
 systemctl stop mariadb-restore
-rm -rf /var/lib/mysql-restore-test /var/lib/mysql-restore-chain-working
+rm -rf /var/lib/mysql-restore-test
+
+# 체인 롤포워드 워킹 카피 — isolated/production 모드 공통으로 항상 생성됨(이슈 #119).
+# --prepare가 이 디렉터리 안에서 파일을 직접 변형시키므로 재사용 불가한 일회성 데이터.
+# --copy-back으로 필요한 내용은 이미 대상 datadir로 옮겨진 뒤이므로 항상 안전하게 삭제 가능.
+rm -rf /var/lib/mysql-restore-chain-working
 ```
+
+> production 모드(이슈 #119, [4])로 실행한 경우 `/var/lib/mysql-restore-test`는
+> 애초에 생성되지 않으므로, 위 중 체인 워킹 카피 삭제 한 줄만 해당됩니다.
 
 ## 사람이 하는 일 vs 자동화가 하는 일
 
@@ -158,6 +167,9 @@ rm -rf /var/lib/mysql-restore-test /var/lib/mysql-restore-chain-working
 | `backup_restore_validation_tables` | 7개 테이블 | 표본 검증 대상 (member, member_stats, game, game_participant, move, game_result, rating_history) |
 | `backup_restore_fk_checks` | 7개 관계 | FK 무결성 Gate 대상 (`stone_game_schema_v1.sql` 기준) |
 | `backup_restore_port` | 3307 | (참고용, 현재 `--skip-networking`으로 미사용 — 향후 TCP 필요 시 대비해 유지) |
+| `backup_restore_preserve_corrupted_datadir` | `true` | 기존 datadir 보존 여부(이슈 #119 결정 기록, 2026-09-04 전환 완료) |
+| `mariadb_monitor_name` | `MariaDB-Monitor` | `maxctrl call command mariadbmon failover` 대상 모니터명 |
+| `dr_failsafe_read_only_cnf_path` | `/etc/my.cnf.d/zz-dr-failsafe-read-only.cnf` | Split-brain 방지 임시 안전장치 파일 경로 |
 
 ## 변경 이력 요약
 
@@ -167,3 +179,110 @@ rm -rf /var/lib/mysql-restore-test /var/lib/mysql-restore-chain-working
 | #114 / PR #125 | Full+Incremental 체이닝 방식으로 확장 |
 | #128 / PR #130 | 레거시 단일 Full 백업/복구 코드 완전 제거 (체이닝으로 단일화) |
 | #129 / PR #131 | Incremental→Full 자동 승격, `chain_<날짜>`/`incr_<NN>_<타임스탬프>` 명명 규칙 도입 |
+
+## DR 복구본 운영 재개 반자동화 (이슈 #119, 신규)
+
+> ⚠️ **주의**: 위 "복구" 섹션은 여전히 `mariadb_restore.yml`/단일 Full 백업 시절 설명이
+> 남아있어 실제 코드(`restore_chain.yml`, 체인 기반)와 어긋나 있습니다. 이 문서 전체
+> 최신화는 별도로 진행 필요 — 이 섹션은 신규 추가분만 우선 반영합니다.
+
+위 "복구"(`mariadb_restore_chain.yml`, `restore_chain.yml`)는 **"백업본이 온전한지
+검증"**까지만 다룹니다(격리 인스턴스, `--skip-networking`). 실제로 서버가 죽어서
+그 백업으로 서비스를 되살려야 하는 상황에서는 `mariadb_dr_recovery.yml`을 사용합니다.
+
+**절대 한 번에 전부 실행되지 않습니다.** 4단계(Checkpoint)로 나뉘어 있고, `--tags`로
+한 단계씩만 실행됩니다. 각 단계 결과를 사람이 직접 확인한 뒤 다음 단계를 실행하세요.
+
+```bash
+# [4] 운영 datadir 복구 (완전 자동) — ⚠️ 대상 호스트의 /var/lib/mysql을 삭제 후 교체합니다
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags restore \
+  -e backup_restore_mode=production \
+  -e backup_restore_chain_dir=chain_<선택한_체인_타임스탬프>
+
+# [5] 복제 재구성 (반자동 — Master/Replica 역할은 사람이 판단해 지정)
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags replication \
+  -e backup_restore_role=replica
+  # Master 자동 판별 실패(양쪽 다 유실) 시에만 아래 추가:
+  # -e backup_restore_master_host=<살아있는_반대쪽_호스트_IP>
+
+# [6] MaxScale 재편입 확인 (확인만 자동, 신규 등록 아님)
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags maxscale_verify \
+  -e backup_restore_role=replica
+
+# [7] 서비스 재개 전 최종 체크리스트 출력 (자동 체크리스트, 서비스 재개 승인은 사람이 직접)
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags checklist \
+  -e backup_restore_role=replica
+```
+
+### [4]에서 격리 검증과 달라지는 점 (`backup_restore_mode: production`)
+
+| 항목 | isolated(기존, 기본값) | production(신규) |
+|---|---|---|
+| 대상 디렉터리 | `/var/lib/mysql-restore-test` | 실제 운영 `/var/lib/mysql` |
++| 기존 데이터 처리 | 삭제 후 재생성 | `backup_restore_preserve_corrupted_datadir` 변수로 제어(기본 `true`=`.corrupted.<timestamp>` 보존 후 교체, `false`=즉시 삭제). 이슈 #119 코멘트로 결정 기록, 전환 완료(2026-09-04) |
+| 기동 서비스 | 임시 `mariadb-restore.service`(포트 3307, `--skip-networking`) | 정식 `mariadb.service` |
+| Count/PK/FK Gate | `assert`(불일치 시 Play 실패) | **정보성 리포트로 전환**(지난 백업 시점과 현재 운영 Master 사이의 정상적 데이터 간극 때문 — [5]가 이후 따라잡음). SHA256SUMS 무결성 검증은 두 모드 모두 하드 Gate 유지 |
+
+### [7] R/W 헬스체크가 영구 테이블을 쓰지 않는 이유
+
+`stone_game`의 테이블 스키마는 Backend Alembic Migration이 유일한 기준으로 이미
+확정되어 있습니다(이슈 #89 코멘트). 이 헬스체크는 영구 테이블을 신설하는 대신
+**`CREATE TEMPORARY TABLE`**을 사용해 커넥션 종료 시 자동 삭제되도록 했습니다 —
+Alembic 관리 스키마와 완전히 무관하며 별도 정리도 필요 없습니다. 전용 계정
+(`dr_healthcheck_svc`)은 `CREATE TEMPORARY TABLES` 권한만 가지고 있습니다.
+
+**신규 Vault 변수 추가 필요**: `dr_healthcheck_svc_password` — 다른 5개 계정과
+동일한 방식으로 `ansible-vault edit group_vars/all/vault.yml`에 추가할 것.
+
+### 신규 계정 안내
+
+`dr_healthcheck_svc` 계정을 이 이슈에서 신설했습니다(영구 테이블 접근 권한 없음,
+`CREATE TEMPORARY TABLES`만 보유).
+
+### Master 0개(양쪽 다 유실) 시나리오 (PR #133 리뷰 반영, 2026-09-04)
+
+두 서버가 동시에 유실되어 살아있는 Master가 하나도 없는 최악의 시나리오도 지원합니다.
+
+- [4] 실행 시 `detect_master`가 실패하면(Master 0개), production 모드에서는
+  Play를 죽이지 않고 `mariadb_master_detected=false`로 기록한 뒤 계속 진행합니다
+  (isolated 모드는 기존처럼 하드 실패 — 격리 검증은 항상 살아있는 비교 대상이
+  있다는 전제이므로).
+- 이 경우 Count/CHECKSUM 비교는 "N/A(Master 미검출로 비교 대상 없음)" 정보성
+  안내로 대체되고, SHA256SUMS 무결성/FK Gate는 그대로 하드 Gate로 통과해야 합니다.
+- [5]에서는 반드시 `-e backup_restore_role=master`로 지정하세요(`replica` 아님 —
+  붙을 살아있는 Master가 없으므로 이 서버 자신이 새 Master가 되어야 합니다).
+- [6]에서 이 서버가 아직 MaxScale에 Master로 인식되지 않았다면, 코드가 자동으로
+  `maxctrl call command mariadbmon failover MariaDB-Monitor`를 실행해 실제 승격을
+  강제합니다(이미 인식된 상태라면 이 명령은 실행되지 않고 확인만 하고 넘어갑니다).
+
+**실측(2026-09-04, mariadb-01/02 양쪽 실제 정지로 재현)**: [4]→[5]→[6]→[7] 전체
+End-to-End 통과 확인. 다만 이 환경에서는 복제 미설정 상태의 고립 서버를 MaxScale이
+`auto_failover` 설정과 무관하게 즉시 Master로 판정하는 것으로 확인되어, 위 failover
+강제 트리거가 실제로 발동하는 상황은 이번 실측에서는 재현되지 않았습니다(방어 코드로
+유지).
+
+### Split-brain 방지 안전장치 (PR #133 리뷰 반영, 2026-09-04)
+
+위 시나리오 실측 중 다음 위험을 발견했습니다: 복제 설정이 없고 `read_only`도 아닌
+서버는 `auto_failover` 설정과 무관하게 MaxScale이 즉시 "고립된 Master"로 판정합니다.
+따라서 양쪽 다 유실된 상태에서 한쪽이 새 Master로 확립된 뒤, **나머지 한쪽이 복제
+재구성 없이 그냥 기동되면 그 쪽도 독립적으로 Master로 오판정되어 Split-brain이
+발생할 수 있습니다.**
+
+이를 막기 위해 [6]에서 role=master로 확립되는 즉시, 같은 `mariadbs` 그룹의 나머지
+호스트에 `/etc/my.cnf.d/zz-dr-failsafe-read-only.cnf`(`read_only=1`)를 자동
+배포합니다(서비스 재기동 없이 파일만 배치 — 다음 기동을 대비하는 것). 이 파일이
+배치된 호스트는 **반드시 이 playbook([5] `role=replica`)으로 정식 재편입해야
+안전장치가 자동 해제**됩니다 — 수동으로 그냥 `systemctl start mariadb`로 켜지 마세요.
+정상 재편입이 확인되면 `replication_setup.yml`이 자동으로 파일을 제거하고, 이후엔
+기존 정책(이슈 #50)대로 MaxScale이 read_only를 런타임 관리합니다.
+
+대상 호스트가 도달 불가(하드웨어 장애 등 진짜 유실) 상태라 배치 자체가 실패해도
+문제없습니다 — 나중에 그 서버를 이 playbook으로 되살릴 때 자연히 정상 상태가 됩니다.
+
+> ⚠️ 이 안전장치 코드는 `--syntax-check` 통과까지 확인했으며, 실제 재현 검증(세
+> 번째 서버 다운/재기동 테스트)은 다음 DR 훈련으로 이월되었습니다.
