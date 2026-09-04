@@ -1,0 +1,95 @@
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: [6] MaxScale 재편입 확인 이후, 서비스 재개 전 최종 체크리스트를 자동
+#          출력한다 (이슈 #119 [7])
+#          - read_only 상태 확인 + Common VIP 경유 샘플 R/W 트랜잭션까지는 자동 수행
+#          - "서비스 재개" 최종 승인은 절대 자동화하지 않음 — 이 태스크는 체크리스트를
+#            출력하는 것으로 끝나며, 그 다음 행동(트래픽 전면 재개 등)은 사람이 직접
+#            판단·수행한다
+#          - R/W 테스트는 영구 테이블 대신 CREATE TEMPORARY TABLE 사용 — 세션 종료 시
+#            자동 삭제되어 Alembic 관리 스키마와 무관, 별도 정리 불필요
+
+- name: backup_restore_role 확인 (기대 read_only 값 판정에 사용)
+  ansible.builtin.assert:
+    that:
+      - backup_restore_role in ['master', 'replica']
+    fail_msg: >-
+      backup_restore_role(master 또는 replica)을 extra-vars로 지정할 것 — [5]/[6]에서
+      지정한 값과 동일하게 넘겨야 기대 상태를 정확히 판정할 수 있습니다.
+
+- name: 실제 Master 판별 (헬스체크 계정 생성 대상 확보 — 이 playbook 실행은 --tags별로
+    독립적이므로 이전 단계 상태를 재사용하지 않고 다시 판별함)
+  ansible.builtin.import_role:
+    name: backup_transfer
+    tasks_from: detect_master
+
+- name: dr_healthcheck_svc 계정 준비 (없으면 생성, 있으면 스킵 — 멱등)
+  ansible.builtin.import_tasks: dr_healthcheck_account.yml
+
+# ── ① read_only 상태 확인 ────────────────────────────────────────────────
+
+- name: read_only 값 조회 (이 서버)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "SHOW GLOBAL VARIABLES LIKE 'read_only'"
+  register: dr_read_only_result
+  changed_when: false
+
+- name: 기대 read_only 값 계산 (Master=OFF / Replica=ON)
+  ansible.builtin.set_fact:
+    dr_read_only_actual: "{{ dr_read_only_result.query_result[0][0].Value }}"
+    dr_read_only_expected: "{{ 'OFF' if backup_restore_role == 'master' else 'ON' }}"
+
+# ── ② Common VIP 경유 R/W 헬스체크 (임시 테이블) ──────────────────────────
+
+- name: 헬스체크 자격증명 파일 배포 (대상 호스트에 임시 배치, 테스트 후 즉시 삭제)
+  ansible.builtin.template:
+    src: dr_healthcheck_svc.cnf.j2
+    dest: "{{ dr_healthcheck_credentials_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: VIP 경유 CREATE TEMPORARY TABLE → INSERT → SELECT 1회 커넥션 내 실행
+  # --skip-ssl: 이슈 #102(VIP 리스너 TLS 미설정, open) 워크어라운드 — E_infra_snapshot.md 5절 참고
+  # 임시 테이블은 이 커넥션 종료와 동시에 자동 삭제되므로 별도 DROP/정리 불필요
+  ansible.builtin.command: >
+    mariadb --defaults-extra-file={{ dr_healthcheck_credentials_file }} --skip-ssl
+    -e "CREATE TEMPORARY TABLE dr_healthcheck_tmp (id INT, checked_at DATETIME);
+    INSERT INTO dr_healthcheck_tmp VALUES (1, NOW());
+    SELECT * FROM dr_healthcheck_tmp;"
+  register: dr_vip_rw_test
+  changed_when: false
+  failed_when: false
+  # 참고: 이 태스크는 대상 DB 서버(mariadb-01/02) 자신에서 VIP로 접속을 시도합니다.
+  # DB 서버가 VIP 대역(10.1.93.x)에 라우팅 가능하다는 전제이며, 만약 방화벽/라우팅
+  # 정책상 막혀 있다면 delegate_to를 Backend와 동일 네트워크의 다른 호스트로 변경 필요.
+
+- name: 헬스체크 자격증명 파일 즉시 삭제 (평문 비밀번호 잔존 방지)
+  ansible.builtin.file:
+    path: "{{ dr_healthcheck_credentials_file }}"
+    state: absent
+
+- name: VIP R/W 테스트 성공 여부 판정
+  ansible.builtin.set_fact:
+    dr_vip_rw_ok: "{{ dr_vip_rw_test.rc == 0 and '1' in dr_vip_rw_test.stdout }}"
+
+# ── ③ 최종 체크리스트 출력 (사람 승인용 — 여기서 자동으로 더 진행하지 않음) ──────
+
+- name: "최종 체크리스트 (서비스 재개 여부는 이 결과를 보고 사람이 직접 판단·수행할 것)"
+  ansible.builtin.debug:
+    msg:
+      - "======================================================================"
+      - "DR 복구 후 서비스 재개 최종 체크리스트 — {{ inventory_hostname }} (역할: {{ backup_restore_role }})"
+      - "======================================================================"
+      - "① read_only 상태: 실제={{ dr_read_only_actual }} / 기대={{ dr_read_only_expected }} \
+        {{ '✅ 일치' if dr_read_only_actual == dr_read_only_expected else '⚠️ 불일치 — 원인 확인 필요' }}"
+      - "② Common VIP({{ common_vip_host }}:{{ common_vip_port }}) 경유 R/W 테스트: \
+        {{ '✅ 성공' if dr_vip_rw_ok else '❌ 실패 — rc=' + (dr_vip_rw_test.rc | string) + ', stderr=' + dr_vip_rw_test.stderr }}"
+      - "----------------------------------------------------------------------"
+      - "⚠️ 이 자동화는 여기서 종료됩니다. 실제 서비스(트래픽) 재개 여부는 위 체크리스트를"
+      - "   근거로 사람이 직접 최종 판단하고 수행하세요. (이슈 #119 완료 기준 — 자동 승인 없음)"
+      - "======================================================================"

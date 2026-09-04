@@ -1,0 +1,72 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: DR 복구본을 이용한 운영 재개 반자동화 (이슈 #119)
+#          Checkpoint(사람 확인 지점)를 Ansible tags 4단계로 분리 — 각 단계를
+#          사람이 개별 실행하며, 이전 단계 결과를 확인한 뒤 다음 단계를 직접 실행한다.
+#          한 번의 실행으로 전 과정이 자동 진행되지 않도록 의도적으로 tags 없이는
+#          아무 태스크도 실행되지 않게 구성했다(태스크마다 명시적 tags 지정).
+#
+# ⚠️ 전제: [4]는 실제 운영 datadir를 삭제하고 교체하는 파괴적 작업입니다.
+#         반드시 -l 옵션으로 정확히 1개 호스트를 지정하세요.
+#
+# 실행 예 (반드시 이 순서로, 각 단계 사이 결과를 확인하고 진행):
+#
+#   # [4] 운영 datadir 복구 (완전 자동)
+#   ansible-playbook playbooks/mariadb_dr_recovery.yml -l mariadb-02 --ask-vault-pass \
+#     --tags restore \
+#     -e backup_restore_mode=production \
+#     -e backup_restore_chain_dir=chain_20260907_020000
+#
+#   # [5] 복제 재구성 (역할은 사람이 판단해 지정 — 반자동)
+#   ansible-playbook playbooks/mariadb_dr_recovery.yml -l mariadb-02 --ask-vault-pass \
+#     --tags replication \
+#     -e backup_restore_role=replica
+#     # (자동 판별 실패 시에만 추가) -e backup_restore_master_host=192.168.52.40
+#
+#   # [6] MaxScale 재편입 확인 (확인만 자동)
+#   ansible-playbook playbooks/mariadb_dr_recovery.yml -l mariadb-02 --ask-vault-pass \
+#     --tags maxscale_verify \
+#     -e backup_restore_role=replica
+#
+#   # [7] 서비스 재개 전 최종 체크리스트 (자동 체크리스트 + 사람 최종 승인)
+#   ansible-playbook playbooks/mariadb_dr_recovery.yml -l mariadb-02 --ask-vault-pass \
+#     --tags checklist \
+#     -e backup_restore_role=replica
+
+- name: MariaDB DR 복구본 운영 재개 반자동화
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "[4] 운영 datadir 복구 (완전 자동)"
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: detect_master
+      tags: [restore]
+
+    - name: "[4] 운영 datadir 복구 실행"
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: restore_chain
+      tags: [restore]
+
+    - name: "[5] 복제 재구성 (반자동 — 역할은 사람이 판단)"
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: replication_setup
+      tags: [replication]
+
+    - name: "[6] MaxScale 재편입 확인 (확인 자동화)"
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: maxscale_verify
+      tags: [maxscale_verify]
+
+    - name: "[7] 서비스 재개 전 최종 체크리스트 (자동 체크리스트 + 사람 최종 승인)"
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: service_checklist
+      tags: [checklist]

@@ -1,0 +1,158 @@
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: [4] 운영 datadir 복구 완료 이후, 복구된 서버의 복제 역할(Master/Replica)을
+#          재구성한다 (이슈 #119 [5])
+#          - 역할(master|replica) 자체는 사람이 extra-vars로 판단·지정 (완전 자동화 대상 아님)
+#          - Master 접속 정보(IP)는 detect_master.yml(maxctrl list servers) 자동 판별을
+#            우선 시도하고, 실패(양쪽 다 유실된 최악의 시나리오)한 경우에만
+#            backup_restore_master_host를 사람이 직접 지정하도록 강제한다 (block/rescue)
+#          - TS-008 트러블슈팅 사례의 CHANGE MASTER TO 패턴(GTID 기반 재연결)을 그대로 따름
+
+- name: 단일 호스트 대상 여부 확인 (파괴적 작업 안전장치)
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length == 1
+    fail_msg: >-
+      이 playbook은 반드시 -l 옵션으로 정확히 1개 호스트를 지정해서 실행해야 합니다.
+      현재 대상: {{ ansible_play_hosts_all }}
+
+- name: backup_restore_role 필수 확인 (master|replica — 사람이 직접 판단·지정)
+  ansible.builtin.assert:
+    that:
+      - backup_restore_role in ['master', 'replica']
+    fail_msg: >-
+      backup_restore_role(master 또는 replica)을 extra-vars로 반드시 지정할 것.
+      이 서버를 Master로 세울지 Replica로 붙일지는 사람이 판단해야 하는 영역입니다.
+      예: -e backup_restore_role=replica
+
+# ── replica 역할: Master 접속 정보 확보 (자동 판별 우선 → 실패 시에만 사람 지정) ──
+
+- name: Master 접속 정보 확보 (replica 역할일 때만)
+  when: backup_restore_role == 'replica'
+  block:
+    - name: 자동 판별 시도 (maxctrl list servers 위임)
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: detect_master
+
+    - name: 자동 판별된 Master를 접속 정보로 사용
+      ansible.builtin.set_fact:
+        replication_master_host: >-
+          {{ hostvars[mariadb_master_inventory_hostname].ansible_host
+             | default(mariadb_master_inventory_hostname) }}
+        replication_master_source: "자동 판별(maxctrl)"
+  rescue:
+    - name: 자동 판별 실패 — 사람이 지정한 backup_restore_master_host 필수 확인
+      ansible.builtin.assert:
+        that:
+          - backup_restore_master_host is defined
+          - backup_restore_master_host | length > 0
+        fail_msg: >-
+          maxctrl로 Master를 자동 판별하지 못했습니다(양쪽 서버 모두 유실된 최악의
+          시나리오일 수 있습니다). 이 경우 backup_restore_master_host를 extra-vars로
+          반드시 직접 지정해야 합니다.
+          예: -e backup_restore_master_host=192.168.52.40
+
+    - name: 사람이 지정한 Master 접속 정보 사용
+      ansible.builtin.set_fact:
+        replication_master_host: "{{ backup_restore_master_host }}"
+        replication_master_source: "사람이 직접 지정(자동 판별 실패)"
+
+- name: Master 접속 정보 확정 안내
+  ansible.builtin.debug:
+    msg: >-
+      Replica 복제 대상 Master: {{ replication_master_host }}:{{ backup_restore_master_port }}
+      (확보 방식: {{ replication_master_source }})
+  when: backup_restore_role == 'replica'
+
+# ── replica 역할: 복제 설정 ──────────────────────────────────────────────
+
+- name: 기존 복제 채널 정리 (재구성 전 초기화 — replica 역할)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "STOP SLAVE"
+  when: backup_restore_role == 'replica'
+  failed_when: false
+  changed_when: false
+
+- name: CHANGE MASTER TO 실행 (GTID 기반, TS-008 패턴 동일)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: >-
+      CHANGE MASTER TO
+        MASTER_HOST='{{ replication_master_host }}',
+        MASTER_PORT={{ backup_restore_master_port }},
+        MASTER_USER='repl_user',
+        MASTER_PASSWORD='{{ repl_user_password }}',
+        MASTER_USE_GTID=slave_pos
+  when: backup_restore_role == 'replica'
+  no_log: true
+  changed_when: true
+
+- name: START SLAVE 실행
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "START SLAVE"
+  when: backup_restore_role == 'replica'
+  changed_when: true
+
+- name: 복제 상태 안정화 대기 (IO/SQL Thread 기동 확인)
+  ansible.builtin.pause:
+    seconds: 5
+  when: backup_restore_role == 'replica'
+
+- name: SHOW SLAVE STATUS 조회
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "SHOW SLAVE STATUS"
+  when: backup_restore_role == 'replica'
+  register: dr_slave_status
+  changed_when: false
+
+- name: 복제 정상 기동 Gate (Slave_IO_Running / Slave_SQL_Running — TS-008 최종 검증 기준과 동일)
+  ansible.builtin.assert:
+    that:
+      - dr_slave_status.query_result[0][0].Slave_IO_Running == 'Yes'
+      - dr_slave_status.query_result[0][0].Slave_SQL_Running == 'Yes'
+    fail_msg: >-
+      복제 채널이 정상 기동되지 않았습니다.
+      Slave_IO_Running={{ dr_slave_status.query_result[0][0].Slave_IO_Running }},
+      Slave_SQL_Running={{ dr_slave_status.query_result[0][0].Slave_SQL_Running }},
+      Last_IO_Error={{ dr_slave_status.query_result[0][0].Last_IO_Error }},
+      Last_SQL_Error={{ dr_slave_status.query_result[0][0].Last_SQL_Error }}
+    success_msg: >-
+      복제 정상 기동 확인. Seconds_Behind_Master={{ dr_slave_status.query_result[0][0].Seconds_Behind_Master }}
+      (0에 가까워질 때까지 시간이 걸릴 수 있음 — [4]에서 확인한 데이터 간극을 이 시점부터 따라잡음)
+  when: backup_restore_role == 'replica'
+
+# ── master 역할: 잔여 복제 설정 정리만 수행(신규 승격 로직 없음 — MaxScale/사람 판단 영역) ──
+
+- name: 잔여 복제 설정 정리 (master 역할 — 과거 replica였을 때의 설정이 남아있을 수 있음)
+  ansible.mariadb.mariadb_query:
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    login_user: root
+    query: "RESET SLAVE ALL"
+  when: backup_restore_role == 'master'
+  failed_when: false
+  changed_when: true
+
+- name: "[master] 안내"
+  ansible.builtin.debug:
+    msg: >-
+      master 역할로 지정됨 — 이 태스크는 잔여 복제 설정 정리만 수행합니다.
+      실제 Master 승격/전환 판단(다른 서버와의 관계 포함)은 MaxScale(auto_rejoin) 및
+      사람의 판단 영역이며 이 자동화 범위 밖입니다.
+  when: backup_restore_role == 'master'
+
+- name: 다음 단계 안내
+  ansible.builtin.debug:
+    msg: >-
+      [5] 복제 재구성 완료. 다음 Checkpoint: --tags maxscale_verify 로 MaxScale이
+      이 서버를 정상 재인식했는지 확인하세요.
+      예: ansible-playbook playbooks/mariadb_dr_recovery.yml -l {{ inventory_hostname }}
+      --tags maxscale_verify --ask-vault-pass
