@@ -10,6 +10,6 @@ maxscale_key_path: /etc/pki/seokpan-ca/services/maxscale-01.key
 # Backend는 maxscale-01 실제 IP가 아니라 Common VIP(10.1.93.90)로 접속하므로
 # SAN에 둘 다 포함 (harbor 사례와 동일 원칙)
 tls_service_fqdn: maxscale-01.seokpan.internal
-tls_service_san: "DNS:maxscale-01.seokpan.internal,IP:192.168.53.40,IP:10.1.93.90"
+tls_service_san: "DNS:maxscale-01.seokpan.internal,DNS:db.seokpan.soldesk.store,IP:192.168.53.40,IP:10.1.93.90"
 tls_service_cert_path: "{{ maxscale_cert_path }}"
 tls_service_key_path: "{{ maxscale_key_path }}"
