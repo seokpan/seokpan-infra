@@ -39,3 +39,7 @@ password={{ maxscale_monitor_password }}
 type=listener
 service=Read-Write-Service
 port=3306
+ssl=true
+ssl_cert={{ maxscale_cert_path }}
+ssl_key={{ maxscale_key_path }}
+ssl_version=MAX
