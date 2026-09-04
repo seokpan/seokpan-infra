@@ -1,0 +1,15 @@
+---
+# Owner: 김상희
+# Purpose: maxscale-01 TLS 인증서 발급/배포용 host_vars (이슈 #102)
+
+maxscale_cert_path: /etc/pki/seokpan-ca/services/maxscale-01.crt
+maxscale_key_path: /etc/pki/seokpan-ca/services/maxscale-01.key
+
+# tls_deploy role이 이 값을 보고 인증서를 발급/배포한다.
+# 위 maxscale_cert_path/key_path와 반드시 동일한 값을 가리키도록 유지할 것.
+# Backend는 maxscale-01 실제 IP가 아니라 Common VIP(10.1.93.90)로 접속하므로
+# SAN에 둘 다 포함 (harbor 사례와 동일 원칙)
+tls_service_fqdn: maxscale-01.seokpan.internal
+tls_service_san: "DNS:maxscale-01.seokpan.internal,IP:192.168.53.40,IP:10.1.93.90"
+tls_service_cert_path: "{{ maxscale_cert_path }}"
+tls_service_key_path: "{{ maxscale_key_path }}"
