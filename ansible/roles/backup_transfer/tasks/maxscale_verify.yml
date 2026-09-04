@@ -6,6 +6,12 @@
 #          - 신규 등록 작업 자체는 불필요(auto_rejoin=true로 모니터가 자동 인식) —
 #            여기서는 "확인"만 수행. 단, 크래시 이후 Maintenance 플래그가 남아있는
 #            경우에 한해 그 플래그만 해제(신규 서버 등록과는 다른 작업)한다.
+#          [PR #133 리뷰 반영] backup_restore_role=master인데 아직 MaxScale이
+#          Master로 인식하지 않은 경우(양쪽 다 유실 → 살아있는 Master가 아예 없어
+#          auto_failover가 스스로 판단할 근거가 없던 시나리오)에는, "확인"만으로
+#          끝내지 않고 MariaDB-Monitor failover를 명시적으로 트리거해 실제 승격까지
+#          수행한다. 이 경우에만 해당 — 이미 Master로 정상 인식된 일반적인 케이스
+#          (한쪽만 유실)에서는 기존과 동일하게 확인만 하고 별도 명령을 실행하지 않는다.
 
 - name: 단일 호스트 대상 여부 확인 (파괴적 작업은 아니지만 -l 관례 일관 적용)
   ansible.builtin.assert:
@@ -77,6 +83,56 @@
   ansible.builtin.set_fact:
     dr_maxctrl_expected_state: "{{ 'Master' if backup_restore_role == 'master' else 'Slave' }}"
 
+# ── master 역할인데 아직 Master로 인식되지 않은 경우 — 실제 승격 트리거 (PR #133 리뷰 반영) ──
+
+- name: master 역할인데 아직 Master로 인식되지 않았는지 확인 (양쪽 다 유실 시나리오)
+  ansible.builtin.set_fact:
+    dr_maxctrl_needs_failover: "{{ backup_restore_role == 'master' and 'Master' not in dr_maxctrl_final_line }}"
+
+- name: MariaDB-Monitor failover 강제 트리거
+  # 살아있는 Master가 없어 auto_failover가 스스로 판단할 근거가 없었던 경우에만 실행.
+  # failover는 "기존 Master가 죽었다"는 전제로 살아있는 후보 중 최적을 새 Master로
+  # 승격시키는 명령 — 이 시나리오에서는 복구 대상(이 서버)이 유일한 후보이므로
+  # 사실상 이 서버가 승격됨. (switchover가 아닌 failover를 쓰는 이유: switchover는
+  # "현재 살아있는 Master"가 있다는 전제의 계획된 전환이라 이 시나리오엔 맞지 않음)
+  ansible.builtin.command: "maxctrl call command mariadbmon failover {{ mariadb_monitor_name }}"
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  when: dr_maxctrl_needs_failover
+  changed_when: true
+  register: dr_failover_result
+  failed_when: false
+
+- name: failover 명령 실행 결과 확인
+  ansible.builtin.assert:
+    that:
+      - dr_failover_result.rc == 0
+    fail_msg: >-
+      MariaDB-Monitor failover 명령이 실패했습니다(rc={{ dr_failover_result.rc }}):
+      {{ dr_failover_result.stderr | default(dr_failover_result.stdout) }}
+      maxscale-01에서 'maxctrl call command mariadbmon failover {{ mariadb_monitor_name }}'를
+      직접 실행해 상태를 확인하세요. /var/log/maxscale/maxscale.log 로그도 함께 확인할 것.
+  when: dr_maxctrl_needs_failover
+
+- name: failover 이후 상태 안정화 대기
+  ansible.builtin.pause:
+    seconds: 5
+  when: dr_maxctrl_needs_failover
+
+- name: failover 이후 재조회
+  ansible.builtin.command: maxctrl --tsv list servers
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  when: dr_maxctrl_needs_failover
+  changed_when: false
+  check_mode: false
+  register: dr_maxctrl_result_after_failover
+
+- name: 최종 조회 결과 라인 재확정 (failover 실행한 경우 갱신)
+  ansible.builtin.set_fact:
+    dr_maxctrl_final_line: >-
+      {{ (dr_maxctrl_result_after_failover.stdout_lines
+          | select('search', '^' + inventory_hostname + '\t') | list | first)
+         if dr_maxctrl_needs_failover else dr_maxctrl_final_line }}
+
 - name: MaxScale 재인식 Gate (기대 역할 + Running 여부)
   ansible.builtin.assert:
     that:
@@ -88,6 +144,43 @@
       (참고: TS-008 사례처럼 "Running=정상"이 Replication Channel 정상을 보장하지
       않으므로, [5]의 SHOW SLAVE STATUS 결과와 함께 판단할 것)
     success_msg: "MaxScale 재인식 확인: {{ dr_maxctrl_final_line }}"
+
+# ── Split-brain 방지 (PR #133 리뷰 반영, 2026-09-04 실측 검증 중 발견) ──────────
+#
+# 실측 확인: 복제 설정이 없고 read_only도 아닌 서버는, auto_failover 설정과
+# 무관하게 MaxScale이 즉시 "고립된 Master"로 판정한다(선출 행위가 아니라 상태
+# 관찰·라벨링이라 auto_failover가 관여하지 않음). 따라서 이 서버가 role=master로
+# 새 Master가 된 뒤, 같은 mariadbs 그룹의 나머지 호스트가 복제 재구성 없이 그냥
+# 기동되면 그 호스트도 똑같이 "고립된 Master"로 오판정되어 Split-brain이 발생할
+# 수 있음을 확인. 이를 막기 위해, 나머지 호스트에 "부팅 즉시 read_only로 시작"
+# 하는 임시 안전장치 파일을 미리 심어둔다(서비스 재기동은 하지 않음 — 지금 상태를
+# 바꾸는 게 아니라 "다음에 그 서버가 켜질 때"를 대비하는 것).
+
+- name: "[master] Split-brain 방지 — 같은 그룹 나머지 호스트에 임시 read_only 안전장치 배포"
+  ansible.builtin.template:
+    src: dr_failsafe_read_only.cnf.j2
+    dest: "{{ dr_failsafe_read_only_cnf_path }}"
+    owner: root
+    group: mysql
+    mode: "0640"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['mariadbs'] | difference([inventory_hostname]) }}"
+  when: backup_restore_role == 'master'
+  # 대상 호스트의 OS/SSH 자체가 죽어있을 수 있음(하드웨어 장애 등 진짜 유실) —
+  # 그 경우는 배치가 실패해도 문제 없다. 나중에 그 서버를 이 playbook으로 되살릴
+  # 때([4]~[7]) 정상적으로 복제까지 붙게 되므로, 지금 당장 안전장치를 못 심어놔도
+  # 위험이 커지지 않는다(애초에 켜질 수 없는 상태이므로).
+  ignore_errors: true
+
+- name: "[master] 안전장치 배치 결과 안내"
+  ansible.builtin.debug:
+    msg: >-
+      Split-brain 방지 안전장치를 {{ groups['mariadbs'] | difference([inventory_hostname]) }}에
+      배치 시도했습니다(실패했다면 해당 호스트가 현재 도달 불가 상태이기 때문이며,
+      나중에 이 playbook으로 정식 복구할 때 자연히 해소됩니다). ⚠️ 이 안전장치가
+      배치된 호스트는, 반드시 이 playbook([4]~[5] role=replica)으로 정식 재편입해야
+      안전장치가 자동 해제됩니다 — 수동으로 my.cnf를 고쳐서 켜지 마세요.
+  when: backup_restore_role == 'master'
 
 - name: 다음 단계 안내
   ansible.builtin.debug:

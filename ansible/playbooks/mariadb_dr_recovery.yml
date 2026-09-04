@@ -44,7 +44,7 @@
     - name: "[4] 운영 datadir 복구 (완전 자동)"
       ansible.builtin.import_role:
         name: backup_transfer
-        tasks_from: detect_master
+        tasks_from: detect_master_resilient
       tags: [restore]
 
     - name: "[4] 운영 datadir 복구 실행"

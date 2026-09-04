@@ -20,9 +20,24 @@
 
 - name: 실제 Master 판별 (헬스체크 계정 생성 대상 확보 — 이 playbook 실행은 --tags별로
     독립적이므로 이전 단계 상태를 재사용하지 않고 다시 판별함)
-  ansible.builtin.import_role:
-    name: backup_transfer
-    tasks_from: detect_master
+  # PR #133 리뷰 반영: [7] 시점에는 항상 정확히 1개의 Master가 있어야 정상이다
+  # (한쪽만 유실됐던 경우엔 원래 Master, 양쪽 다 유실됐던 경우엔 [6]에서 failover로
+  # 새로 승격된 이 서버 자신). 그런데도 판별에 실패한다면 [5]/[6]이 아직 제대로
+  # 끝나지 않았다는 뜻이므로, 여기서는 원인을 알기 쉽게 안내하고 명확히 실패 처리한다
+  # (production 모드라고 여기서까지 허용하지 않음 — [4]와는 성격이 다름).
+  block:
+    - ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: detect_master
+  rescue:
+    - name: Master 판별 실패 — [5]/[6] 완료 여부 확인 안내
+      ansible.builtin.fail:
+        msg: >-
+          Master 자동 판별에 실패했습니다. [7] 시점에는 정상적으로 Master가 정확히
+          1개 있어야 합니다. backup_restore_role=master로 [5]/[6]을 실행했다면,
+          [6]의 MariaDB-Monitor failover가 실제로 성공했는지 maxctrl list servers로
+          먼저 확인하세요. backup_restore_role=replica였다면 원래 Master(mariadb-01
+          등)에 다른 문제가 생긴 것일 수 있으니 별도로 확인이 필요합니다.
 
 - name: dr_healthcheck_svc 계정 준비 (없으면 생성, 있으면 스킵 — 멱등)
   ansible.builtin.import_tasks: dr_healthcheck_account.yml

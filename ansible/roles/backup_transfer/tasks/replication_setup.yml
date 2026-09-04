@@ -128,6 +128,15 @@
     success_msg: >-
       복제 정상 기동 확인. Seconds_Behind_Master={{ dr_slave_status.query_result[0][0].Seconds_Behind_Master }}
       (0에 가까워질 때까지 시간이 걸릴 수 있음 — [4]에서 확인한 데이터 간극을 이 시점부터 따라잡음)
+
+- name: "[replica] Split-brain 방지 임시 안전장치 제거 (PR #133 리뷰 반영)"
+  # 정상 복제가 확인된 시점부터는 MaxScale의 enforce_read_only_slaves가 read_only를
+  # 런타임으로 관리(이슈 #50 기존 정책)하므로, [6]에서 심어뒀을 수 있는 임시 파일은
+  # 더 이상 필요 없다. 이 서버가 애초에 Split-brain 시나리오 대상이 아니었다면
+  # (파일이 없었다면) state: absent는 아무 일도 안 하고 넘어간다(멱등).
+  ansible.builtin.file:
+    path: "{{ dr_failsafe_read_only_cnf_path }}"
+    state: absent
   when: backup_restore_role == 'replica'
 
 # ── master 역할: 잔여 복제 설정 정리만 수행(신규 승격 로직 없음 — MaxScale/사람 판단 영역) ──
