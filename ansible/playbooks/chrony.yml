@@ -1,0 +1,11 @@
+---
+# 작성자: 이유빈
+# 작성일: 2026-08-27
+# 목적: Chrony/NTP 상태 점검 및 조건부 시간 동기화 자동화
+
+- name: Check and remediate Chrony NTP synchronization
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - chrony

@@ -1,0 +1,62 @@
+# 작성자: 이유빈
+# 작성일: 2026-09-04
+# 수정 이유:
+# - 전체 16대 VM의 /etc/chrony.conf SHA-256 값이 동일함을 확인함.
+# - 기존 Role의 0~3.pool.ntp.org server 방식이 실제 프로젝트 공통 기준과 달라
+#   pool 2.centos.pool.ntp.org 방식으로 정합화하기 위해 수정함.
+# - 기존 VM의 공통 Chrony 설정을 유지하고 불필요한 설정 변경을 방지하기 위해
+#   실제 운영 중인 공통 설정을 템플릿 기준으로 반영함.
+# 목적: 프로젝트 공통 Chrony/NTP 설정 배포
+
+# Ansible managed
+
+# Use public servers from the pool.ntp.org project.
+# Please consider joining the pool (https://www.pool.ntp.org/join.html).
+pool {{ chrony_ntp_pool }} iburst
+
+# Use NTP servers from DHCP.
+sourcedir /run/chrony-dhcp
+
+# Record the rate at which the system clock gains/losses time.
+driftfile /var/lib/chrony/drift
+
+# Allow the system clock to be stepped in the first three updates
+# if its offset is larger than 1 second.
+makestep {{ chrony_makestep_threshold }} {{ chrony_makestep_updates }}
+
+# Enable kernel synchronization of the real-time clock (RTC).
+rtcsync
+
+# Enable hardware timestamping on all interfaces that support it.
+#hwtimestamp *
+
+# Increase the minimum number of selectable sources required to adjust
+# the system clock.
+#minsources 2
+
+# Allow NTP client access from local network.
+#allow 192.168.0.0/16
+
+# Serve time even if not synchronized to a time source.
+#local stratum 10
+
+# Require authentication (nts or key option) for all NTP sources.
+#authselectmode require
+
+# Specify file containing keys for NTP authentication.
+keyfile /etc/chrony.keys
+
+# Save NTS keys and cookies.
+ntsdumpdir /var/lib/chrony
+
+# Insert/delete leap seconds by slewing instead of stepping.
+#leapsecmode slew
+
+# Get TAI-UTC offset and leap seconds from the system tz database.
+leapsectz right/UTC
+
+# Specify directory for log files.
+logdir /var/log/chrony
+
+# Select which information is logged.
+#log measurements statistics tracking

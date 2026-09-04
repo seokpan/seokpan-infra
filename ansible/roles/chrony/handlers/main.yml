@@ -1,0 +1,10 @@
+---
+# 작성자: 이유빈
+# 작성일: 2026-08-27
+# 목적: Chrony 설정 변경 시 chronyd 서비스 재시작
+
+- name: Restart chronyd
+  ansible.builtin.service:
+    name: chronyd
+    state: restarted
+  become: true

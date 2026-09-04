@@ -1,0 +1,28 @@
+---
+# 작성자: 이유빈
+# 작성일: 2026-09-04
+# 수정 이유:
+# - 전체 16대 VM의 /etc/chrony.conf가 동일한 NTP Source를 사용함을 확인함.
+# - 기존 Role의 0~3.pool.ntp.org server 목록이 실제 프로젝트 공통 기준과 달라
+#   pool 2.centos.pool.ntp.org 기준으로 정합화하기 위해 수정함.
+# - Chrony RPM 버전은 Exact Version으로 강제하지 않고,
+#   NTP 설정 기준만 전체 VM에 동일하게 적용하는 B안 정책을 반영함.
+# 목적: Chrony Role 기본 변수 정의
+
+# ============================================================
+# Chrony default variables
+# ============================================================
+
+# 프로젝트 전체 관리 대상 VM의 공통 NTP Source 기준.
+#
+# Chrony RPM 버전은 Exact Version으로 강제하지 않지만,
+# NTP 설정 기준은 전체 VM에 동일하게 적용한다.
+#
+# 실제 시간 동기화가 정상이어도 이 공통 기준과 다르면
+# 설정 정합화 대상으로 판단한다.
+
+chrony_ntp_pool: 2.centos.pool.ntp.org
+
+# 부팅 초기 시간 차이가 큰 경우 빠르게 보정한다.
+chrony_makestep_threshold: 1.0
+chrony_makestep_updates: 3
