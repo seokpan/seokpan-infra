@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: stone_game 데이터베이스 생성 코드화 (이슈 #89)
+
+- name: stone_game 데이터베이스 생성
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+
+  roles:
+    - mariadb_database

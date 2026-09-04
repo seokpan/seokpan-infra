@@ -1,0 +1,11 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: nfs-server 서비스 활성화 및 기동
+
+- name: nfs-server 서비스 enable/start
+  ansible.builtin.systemd:
+    name: "{{ nfs_server_service_name }}"
+    enabled: true
+    state: started

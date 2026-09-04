@@ -2,4 +2,98 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: kubeadm_worker tasks
+# Purpose: Bootstrap Kubernetes worker nodes
+
+# ------------------------------------------------------------
+# Worker prerequisites
+# ------------------------------------------------------------
+
+- name: Install worker-specific packages
+  ansible.builtin.dnf:
+    name: "{{ kubeadm_worker_packages }}"
+    state: present
+
+# ------------------------------------------------------------
+# Join state
+# ------------------------------------------------------------
+
+- name: Check whether worker is already joined
+  ansible.builtin.stat:
+    path: "{{ kubeadm_worker_kubelet_conf }}"
+  register: kubeadm_worker_kubelet_conf_state
+
+- name: Generate temporary worker join command
+  ansible.builtin.command:
+    cmd: >-
+      kubeadm token create
+      --ttl {{ kubeadm_worker_join_token_ttl }}
+      --print-join-command
+  delegate_to: "{{ kubeadm_worker_join_source }}"
+  register: kubeadm_worker_join_command
+  when:
+    - not kubeadm_worker_kubelet_conf_state.stat.exists
+    - not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+- name: Join worker to Kubernetes cluster
+  ansible.builtin.command:
+    cmd: "{{ kubeadm_worker_join_command.stdout }}"
+  when:
+    - not kubeadm_worker_kubelet_conf_state.stat.exists
+    - not ansible_check_mode
+  register: kubeadm_worker_join_result
+  changed_when: kubeadm_worker_join_result.rc == 0
+  no_log: true
+
+# ------------------------------------------------------------
+# Kubelet state
+# ------------------------------------------------------------
+
+- name: Ensure kubelet is enabled and started
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+    state: started
+
+# ------------------------------------------------------------
+# Validation
+# ------------------------------------------------------------
+
+- name: Recheck worker kubelet configuration
+  ansible.builtin.stat:
+    path: "{{ kubeadm_worker_kubelet_conf }}"
+  register: kubeadm_worker_kubelet_conf_after
+
+- name: Gather installed package facts
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Check worker registration in Kubernetes cluster
+  ansible.builtin.command:
+    cmd: >-
+      kubectl
+      --kubeconfig=/etc/kubernetes/admin.conf
+      get node {{ inventory_hostname }}
+      -o name
+  delegate_to: "{{ kubeadm_worker_join_source }}"
+  register: kubeadm_worker_node_registration
+  changed_when: false
+  check_mode: false
+  retries: 12
+  delay: 5
+  until: kubeadm_worker_node_registration.rc == 0
+
+- name: Assert worker bootstrap result
+  ansible.builtin.assert:
+    that:
+      - kubeadm_worker_kubelet_conf_after.stat.exists
+      - "'nfs-utils' in ansible_facts.packages"
+      - "'kubelet.service' in ansible_facts.services"
+      - ansible_facts.services['kubelet.service'].state == "running"
+      - kubeadm_worker_node_registration.stdout == "node/" ~ inventory_hostname
+    fail_msg: "Kubernetes worker bootstrap validation failed on {{ inventory_hostname }}"
+    success_msg: "Kubernetes worker bootstrap validation passed on {{ inventory_hostname }}"

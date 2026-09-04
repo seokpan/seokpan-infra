@@ -1,0 +1,78 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: identity_svc/game_svc/db_admin 계정 생성 및 권한 부여 (이슈 #91)
+#          - 실제 Master에서만 실행 (Replica 직접 조작 시 binlog replay 충돌 위험)
+#          - update_password: on_create → 기존 계정 비밀번호는 절대 덮어쓰지 않음
+#            (이슈 #54 비밀번호 분리 작업과 서로 간섭하지 않게 하기 위함)
+#          - app_user는 2026-09-01 실서버 확인 결과 미존재 확정(결정 A) → 여기서 생성하지 않음
+
+- name: identity_svc 계정 생성 (개인정보 전용, member 전체 컬럼 DML)
+  ansible.mariadb.mariadb_user:
+    name: identity_svc
+    host: '%'
+    password: "{{ identity_svc_password }}"
+    update_password: on_create
+    priv: "{{ identity_svc_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  no_log: true
+
+- name: game_svc 계정 생성 (게임 데이터 테이블 전체 DML)
+  ansible.mariadb.mariadb_user:
+    name: game_svc
+    host: '%'
+    password: "{{ game_svc_password }}"
+    update_password: on_create
+    priv: "{{ game_svc_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  no_log: true
+
+# member 컬럼 단위 GRANT는 mariadb_user의 priv 문자열이 신뢰성 있게 지원하지 않아
+# mariadb_query로 별도 처리 (이슈 #89 코멘트 결정사항 계승).
+# GRANT는 DB 레벨에서 이미 멱등적이므로 changed_when: false로 Ansible 보고만 고정.
+- name: game_svc에 member 컬럼 단위 SELECT 권한 부여 (login_id/password_hash 원천 차단)
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    query: "GRANT SELECT (member_id, nickname, rating) ON {{ stone_game_db }}.member TO 'game_svc'@'%'"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  changed_when: false
+
+- name: game_svc에 member.rating UPDATE 권한 부여 (신규, 이슈 #91)
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    query: "GRANT UPDATE (rating) ON {{ stone_game_db }}.member TO 'game_svc'@'%'"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  changed_when: false
+
+- name: db_admin 계정 생성 (Alembic Migration 전용, Runtime 커넥션 미배포)
+  ansible.mariadb.mariadb_user:
+    name: db_admin
+    host: '%'
+    password: "{{ db_admin_password }}"
+    update_password: on_create
+    priv: "{{ db_admin_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  no_log: true
+
+- name: 권한 즉시 반영 (원본 stone_game_account_split.sql과 동일하게 유지)
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    query: "FLUSH PRIVILEGES"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  changed_when: false

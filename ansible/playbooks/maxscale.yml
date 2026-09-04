@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: Install & configure MaxScale (config 배포 시 비밀번호는 실행 시점 입력)
+
+- name: Deploy MaxScale package and configuration
+  hosts: maxscale
+  become: true
+  gather_facts: true
+
+  roles:
+    - maxscale

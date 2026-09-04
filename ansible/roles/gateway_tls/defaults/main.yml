@@ -1,0 +1,32 @@
+---
+# 작성자: 석판팀
+# Project: 石나가는 판단
+# Scope: Gateway TLS Certificate / Kubernetes TLS Secret Provider
+# 관련: seokpan-infra#111, seokpan-gitops#22
+
+# 기존 internal_ca / tls_deploy와 동일한 Seokpan Internal Root CA를 사용한다.
+# Root CA는 재사용하지만 Harbor와 Gateway의 Leaf Certificate/Private Key는 분리한다.
+internal_ca_dir: /etc/pki/seokpan-ca
+internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+internal_ca_key_path: "{{ internal_ca_dir }}/ca.key"
+internal_ca_country: "KR"
+internal_ca_organization: "seokpan"
+
+gateway_tls_fqdn: "game.seokpan.soldesk.store"
+gateway_tls_san: "DNS:game.seokpan.soldesk.store"
+gateway_tls_days: 365
+gateway_tls_key_bits: 2048
+
+# Controller에 보관하는 Gateway 전용 Leaf Certificate 작업 경로.
+# CA Private Key는 이 경로로 복사하지 않는다.
+gateway_tls_work_dir: "{{ internal_ca_dir }}/issued/{{ gateway_tls_fqdn }}"
+gateway_tls_cert_path: "{{ gateway_tls_work_dir }}/{{ gateway_tls_fqdn }}.crt"
+gateway_tls_key_path: "{{ gateway_tls_work_dir }}/{{ gateway_tls_fqdn }}.key"
+gateway_tls_csr_path: "{{ gateway_tls_work_dir }}/{{ gateway_tls_fqdn }}.csr"
+gateway_tls_ext_path: "{{ gateway_tls_work_dir }}/{{ gateway_tls_fqdn }}.ext"
+
+# 30일 이내 만료 예정이면 재발급한다.
+gateway_tls_renew_before_seconds: 2592000
+
+gateway_tls_namespace: "application"
+gateway_tls_secret_name: "game-seokpan-tls"

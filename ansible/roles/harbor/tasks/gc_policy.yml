@@ -1,0 +1,134 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-08-31
+#
+# roles/harbor/tasks/gc_policy.yml
+# tasks/main.yml 맨 끝, robot_account.yml 다음에 아래 한 줄로 연결한다.
+#   - include_tasks: gc_policy.yml
+#
+# 실제 API 동작 확인 결과(2026-08-31):
+#  - GET /system/gc/schedule : 스케줄 없으면 200 + Content-Length 0(빈 바디, JSON 아님)
+#  - POST /system/gc/schedule : 최초 생성, 201 Created
+#  - PUT /system/gc/schedule  : 기존 스케줄 갱신
+#  - 스케줄 등록 자체는 실제 GC를 즉시 실행하지 않음(/system/gc 이력에 남지 않음)
+
+# ============================================================
+# 1. GC 정책에 필요한 변수 확인
+# ============================================================
+
+- name: Verify Harbor GC variables
+  ansible.builtin.assert:
+    that:
+      - harbor_gc_schedule_cron is defined
+      - harbor_gc_delete_untagged is defined
+    fail_msg: >-
+      harbor_gc_schedule_cron / harbor_gc_delete_untagged 변수가
+      정의되지 않았습니다. defaults/main.yml을 확인하세요.
+
+
+# ============================================================
+# 2. 현재 스케줄 존재 여부 확인
+#    (없으면 200 + 빈 바디이므로 content 길이로 판단한다)
+# ============================================================
+
+- name: Check current Harbor GC schedule
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/system/gc/schedule"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    return_content: true
+  register: harbor_gc_current
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Set fact - GC schedule already exists
+  ansible.builtin.set_fact:
+    harbor_gc_schedule_exists: "{{ (harbor_gc_current.content | default('') | length) > 0 }}"
+
+
+# ============================================================
+# 3. 스케줄 생성(최초, POST) 또는 갱신(PUT)
+# ============================================================
+
+- name: Create Harbor GC schedule (최초 생성)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/system/gc/schedule"
+    method: POST
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      schedule:
+        type: "Custom"
+        cron: "{{ harbor_gc_schedule_cron }}"
+      parameters:
+        delete_untagged: "{{ harbor_gc_delete_untagged }}"
+    validate_certs: false
+    status_code: [201]
+  when: not harbor_gc_schedule_exists
+  no_log: true
+
+- name: Update Harbor GC schedule (기존 갱신)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/system/gc/schedule"
+    method: PUT
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      schedule:
+        type: "Custom"
+        cron: "{{ harbor_gc_schedule_cron }}"
+      parameters:
+        delete_untagged: "{{ harbor_gc_delete_untagged }}"
+    validate_certs: false
+    status_code: [200]
+  when: harbor_gc_schedule_exists
+  no_log: true
+
+
+# ============================================================
+# 4. 적용 결과 재조회 및 검증
+# ============================================================
+
+- name: Get current Harbor GC schedule (검증용)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/system/gc/schedule"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  register: harbor_gc_verify
+  when: not ansible_check_mode
+  check_mode: false
+  no_log: true
+
+- name: Assert GC schedule matches intended value
+  ansible.builtin.assert:
+    that:
+      - harbor_gc_verify.json.schedule.cron == harbor_gc_schedule_cron
+      - harbor_gc_verify.json.schedule.type == "Custom"
+    fail_msg: >-
+      GC 스케줄이 설정값과 다릅니다: {{ harbor_gc_verify.json.schedule | default('N/A') }}
+  when: not ansible_check_mode
+
+
+# ============================================================
+# 5. 결과 요약
+# ============================================================
+
+- name: Display Harbor GC policy summary
+  ansible.builtin.debug:
+    msg:
+      - "GC Schedule Type = {{ harbor_gc_verify.json.schedule.type }}"
+      - "GC Cron = {{ harbor_gc_verify.json.schedule.cron }}"
+      - "Next Scheduled Time = {{ harbor_gc_verify.json.schedule.next_scheduled_time | default('N/A') }}"
+      - "Delete Untagged = {{ harbor_gc_delete_untagged }}"
+      - "최초 생성 여부(이번 실행에서 POST 사용) = {{ not harbor_gc_schedule_exists }}"
+  when: not ansible_check_mode

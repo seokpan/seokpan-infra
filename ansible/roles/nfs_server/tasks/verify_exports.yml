@@ -1,0 +1,31 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: /etc/exports 변경사항이 Runtime에 실제 반영된 뒤 최종 Export 상태 확인
+# 보완: 팀장 리뷰 반영 — handler(exportfs -ra)는 Play 종료 시점에 실행되므로,
+#       main.yml에서 meta: flush_handlers로 먼저 반영시킨 뒤 이 task에서 검증한다.
+#       추가로 정의된 각 Export 경로가 실제로 존재하는지까지 assert로 확인한다.
+# 추가 보완: exportfs -v는 조회 전용(읽기만 함)이라 --check 모드에서도 안전하게 실행 가능
+#           → check_mode: false로 dry-run 시에도 실제 실행되게 하여 검증이 무의미해지지 않게 함
+
+- name: 현재 Export 상태 확인 (exportfs -v)
+  ansible.builtin.command:
+    cmd: exportfs -v
+  register: nfs_server_exportfs_status
+  changed_when: false
+  check_mode: false
+
+- name: Export 상태 출력 (Evidence용)
+  ansible.builtin.debug:
+    var: nfs_server_exportfs_status.stdout_lines
+
+- name: 정의된 모든 Export 경로가 Runtime에 실제 반영됐는지 확인
+  ansible.builtin.assert:
+    that:
+      - item.path in nfs_server_exportfs_status.stdout
+    fail_msg: "{{ item.path }} 이(가) exportfs -v 출력에서 확인되지 않습니다. Runtime 반영 실패 가능성이 있습니다."
+    success_msg: "{{ item.path }} Export 반영 확인됨"
+  loop: "{{ nfs_server_exports }}"
+  loop_control:
+    label: "{{ item.path }}"

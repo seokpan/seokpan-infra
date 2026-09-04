@@ -1,0 +1,57 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-08-28
+#
+# [위치] immutability.yml 및 robot_account.yml보다 먼저 include 되어야 함
+# (harbor/tasks/main.yml에서 순서 주의).
+#
+# [근거] 06 문서: Project 생성(Private) + Tag Immutability 적용.
+# 11 Runbook 자동화 범위 표에도 "Harbor 설치·Project·Robot Account·GC | Ansible(harbor Role)"로
+# Project 생성이 harbor role 책임 범위에 포함되어 있음.
+#
+# Project 생성/Private 설정은 이 파일에서 담당하고,
+# Tag Immutability는 별도 immutability.yml에서 Project ID 조회 후 적용한다.
+
+- name: Harbor Project(seokpan) 존재 여부 확인
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: _harbor_existing_projects
+  changed_when: false
+  check_mode: false
+#  no_log: true
+
+- name: Project 존재 여부 판단
+  ansible.builtin.set_fact:
+    _harbor_project_exists: >-
+      {{ _harbor_existing_projects.json
+         | selectattr('name', 'equalto', harbor_project_name)
+         | list | length > 0 }}
+
+- name: Harbor Project(seokpan) 생성 (Private)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects"
+    method: POST
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    body:
+      project_name: "{{ harbor_project_name }}"
+      metadata:
+        public: "false"   # 06 문서: Project Private 설정
+    status_code: 201
+  when: not _harbor_project_exists
+
+- name: Project 상태 안내
+  ansible.builtin.debug:
+    msg: >-
+      Harbor Project '{{ harbor_project_name }}'
+      {{ '이미 존재함, 생성 건너뜀' if _harbor_project_exists else '신규 생성 완료' }}.
+      Tag Immutability는 다음 immutability.yml 단계에서 확인/적용합니다.
+

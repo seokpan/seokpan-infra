@@ -1,0 +1,76 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: 백업 스크립트 실행에 필요한 사전 준비 (패키지, 인증 파일, 스크립트, NFS 마운트)
+
+- name: rsync 패키지 설치 확인
+  ansible.builtin.dnf:
+    name: rsync
+    state: present
+
+- name: NFS 클라이언트 패키지 설치 확인
+  ansible.builtin.dnf:
+    name: nfs-utils
+    state: present
+
+- name: jq 패키지 설치 확인 (체인 상태 JSON 파싱용, 이슈 #114)
+  ansible.builtin.dnf:
+    name: jq
+    state: present
+
+- name: 로컬 백업 Base 디렉터리 생성
+  ansible.builtin.file:
+    path: "{{ backup_transfer_local_base_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: 로그 디렉터리 생성
+  ansible.builtin.file:
+    path: "{{ backup_transfer_log_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: NFS 백업 마운트 포인트 디렉터리 생성
+  ansible.builtin.file:
+    path: "{{ backup_transfer_nfs_mount_point }}"
+    state: directory
+    mode: "0700"
+
+- name: /etc/fstab에 NFS 백업 Export 마운트 항목 등록
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: "^{{ backup_transfer_nfs_export_host }}:{{ backup_transfer_nfs_export_path }}\\s"
+    line: >-
+      {{ backup_transfer_nfs_export_host }}:{{ backup_transfer_nfs_export_path }}
+      {{ backup_transfer_nfs_mount_point }} nfs4 rw,sync,hard,intr 0 0
+    state: present
+
+- name: 현재 마운트 상태 확인
+  ansible.builtin.command: mountpoint -q {{ backup_transfer_nfs_mount_point }}
+  register: nfs_mount_check
+  failed_when: false
+  changed_when: false
+
+- name: NFS 백업 Export 마운트 (fstab 반영 후 미마운트 상태인 경우에만)
+  ansible.builtin.command: mount {{ backup_transfer_nfs_mount_point }}
+  when: nfs_mount_check.rc != 0
+
+- name: backup_svc 인증 파일 배포 (평문 비밀번호가 role 코드/문서에 남지 않도록 Vault 참조만 사용)
+  ansible.builtin.template:
+    src: backup_svc.cnf.j2
+    dest: "{{ backup_transfer_credentials_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Full+Incremental 체이닝 백업 스크립트 배포 (이슈 #114)
+  ansible.builtin.template:
+    src: backup_chain.sh.j2
+    dest: "{{ backup_transfer_chain_script_path }}"
+    owner: root
+    group: root
+    mode: "0700"

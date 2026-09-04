@@ -1,0 +1,28 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: nfs_server role default variables
+
+nfs_utils_version: "2.5.4-45.el9"
+nfs_server_packages:
+  - "nfs-utils-{{ nfs_utils_version }}"
+
+# Export 경로 정의 (mode는 Export별 실제 운영 값을 반영)
+# 근거: E_infra_snapshot.md 7절 / 06_Ansible 자동화·테스트 설계.docx 10절
+nfs_server_exports:
+  - path: /srv/nfs/k8s
+    comment: "K8s PVC 원본 저장소 (Redis, Jenkins 등)"
+    mode: "0755"
+  - path: /srv/nfs/db-backup
+    comment: "MariaDB Backup Staging — root 전용 접근으로 제한(백업 데이터 보호)"
+    mode: "0700"
+
+nfs_server_allowed_network: "192.168.0.0/16"
+nfs_server_export_options: "rw,sync,no_subtree_check,no_root_squash"
+
+# Export 디렉터리 소유자/그룹은 두 Export 공통, mode만 항목별로 다름
+nfs_server_export_dir_owner: root
+nfs_server_export_dir_group: root
+
+nfs_server_service_name: nfs-server

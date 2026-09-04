@@ -1,0 +1,124 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-09-02
+#
+# [위치] harbor role이 아니라 별도 위치 — Harbor는 VM 대상 role이고 이 Task는
+# Kubernetes Cluster 대상이라 성격이 다름. stage 70-platform.yml에서, cicd Namespace가
+# 이미 존재하는 시점(Root Application이 platform/namespaces-rbac 통해 공용 5종 Namespace를
+# Sync한 이후) 이후에 실행.
+#
+# [원칙, 06 문서 4.1] "Kubernetes Secret의 실제 값은 Ansible이 최초 주입하거나 승인된 Secret
+# 전달 절차가 주입하며, Argo CD는 Secret 참조만 관리한다." — 그래서 이 Secret들은
+# seokpan-gitops repo에 커밋하지 않고, Ansible이 kubernetes.core.k8s로 클러스터에 직접 적용합니다.
+# Jenkins Deployment/JCasC(Git에 있음)는 이 Secret의 "이름"만 참조합니다.
+#
+# [수정 이력, 09/02] PR #98 리뷰 반영: cp-03 고정 + shell kubectl 방식을
+# Ansible Controller + kubernetes.core.k8s(공용 cluster_kubeconfig, argocd_bootstrap과 동일 패턴)
+# 방식으로 전환. 부수적으로 shell 이중 렌더링으로 인해 harbor_robot_name의 리터럴 "$" 문자가
+# bash 변수로 오인식되던 버그도 함께 해소됨.
+#
+# [수정 이력, 09/02 추가] Harbor Robot Account username에 Project 접두사(harbor_project_name)가
+# 누락되어 있던 기존 결함 발견 및 수정. 올바른 형식은 "robot$<project>+<robot_name>"이며
+# (예: robot$seokpan+seokpan-ci), harbor_robot_name 단독으로는 존재하지 않는 계정명이 되어
+# BuildKit → Harbor 인증이 실패하는 문제였음. group_vars/registry/vars.yml에 이미 정의된
+# harbor_project_name / harbor_robot_name을 조합하도록 수정. 실제 클러스터에서 changed=2(1차)
+# → changed=0(재실행) 및 harbor-robot-dockerconfig username 값으로 최종 검증 완료.
+
+- name: 필수 Vault 변수 정의 여부 확인
+  ansible.builtin.assert:
+    that:
+      - vault_harbor_robot_secret is defined
+      - vault_jenkins_admin_username is defined
+      - vault_jenkins_admin_password is defined
+    fail_msg: "필수 vault 변수가 정의되지 않았습니다. group_vars/all/vault.yml 확인 필요"
+  delegate_to: localhost
+  become: false
+
+- name: jenkins-admin Secret 적용 (Jenkins Controller 최초 관리자 계정)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-admin
+        namespace: cicd
+      stringData:
+        username: "{{ vault_jenkins_admin_username }}"
+        password: "{{ vault_jenkins_admin_password }}"
+  register: jenkins_admin_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: harbor-robot-dockerconfig Secret 적용 (BuildKit rootless Agent Pod가 마운트)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: harbor-robot-dockerconfig
+        namespace: cicd
+      data:
+        config.json: >-
+          {{
+            {
+              'auths': {
+                hostvars['harbor'].harbor_hostname: {
+                  'username': 'robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name,
+                  'password': vault_harbor_robot_secret,
+                  'auth': (('robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name ~ ':' ~ vault_harbor_robot_secret) | b64encode)
+                }
+              }
+            } | to_json | b64encode
+          }}
+  register: harbor_dockerconfig_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: jenkins-harbor-credential Secret 적용 (JCasC 환경변수 치환용, Jenkins Credential Store 바인딩)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-harbor-credential
+        namespace: cicd
+      stringData:
+        username: "robot${{ hostvars['harbor'].harbor_project_name }}+{{ hostvars['harbor'].harbor_robot_name }}"
+        password: "{{ vault_harbor_robot_secret }}"
+  register: jenkins_harbor_credential_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: 생성된 Secret 목록 확인 (요약)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    kind: Secret
+    namespace: cicd
+    name: "{{ item }}"
+  loop:
+    - jenkins-admin
+    - harbor-robot-dockerconfig
+    - jenkins-harbor-credential
+  register: jenkins_secrets_summary
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: 결과 요약 출력
+  ansible.builtin.debug:
+    msg: >-
+      {{ jenkins_secrets_summary.results
+         | map(attribute='resources')
+         | map('length')
+         | list }}

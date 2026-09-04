@@ -1,0 +1,9 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: /etc/exports 변경 시 재적용
+
+- name: Reload NFS exports
+  ansible.builtin.command:
+    cmd: exportfs -ra

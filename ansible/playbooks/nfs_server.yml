@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: Install nfs-utils package (version pinned)
+
+- name: Install nfs-utils package
+  hosts: nfs
+  become: true
+  gather_facts: true
+
+  roles:
+    - nfs_server

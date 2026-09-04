@@ -1,0 +1,15 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: Install & configure MariaDB (version pinned, config deploy 포함)
+
+- name: Install MariaDB server package
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+  serial: 1
+
+  roles:
+    - mariadb
+

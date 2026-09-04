@@ -118,8 +118,8 @@
     - name: Show node network information
       ansible.builtin.shell: |
         echo "HOST=$(hostname)"
-        echo "IP={{ ansible_default_ipv4.address }}"
-        echo "GW={{ ansible_default_ipv4.gateway | default('none') }}"
+        echo "IP={{ ansible_facts['default_ipv4']['address'] }}"
+        echo "GW={{ ansible_facts['default_ipv4']['gateway'] | default('none') }}"
       register: node_network
       changed_when: false
 

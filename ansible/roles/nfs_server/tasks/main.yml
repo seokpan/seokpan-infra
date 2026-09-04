@@ -1,0 +1,20 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: nfs_server role entrypoint
+
+- name: Install nfs-utils package
+  ansible.builtin.import_tasks: install.yml
+
+- name: Export 디렉터리 생성 및 /etc/exports 배포
+  ansible.builtin.import_tasks: configure_exports.yml
+
+- name: nfs-server 서비스 활성화 및 기동
+  ansible.builtin.import_tasks: enable_service.yml
+
+- name: 대기 중인 handler 즉시 적용 (Export 변경사항을 Runtime에 먼저 반영)
+  ansible.builtin.meta: flush_handlers
+
+- name: Export 최종 상태 검증
+  ansible.builtin.import_tasks: verify_exports.yml

@@ -2,4 +2,20 @@
 # Owner: 정태훈
 # Scope: Kubernetes / Service Platform
 # Project: 石나가는 판단
-# Purpose: calico default variables
+# Purpose: Calico Operator installation and validation defaults
+
+calico_kubeconfig: "/etc/kubernetes/admin.conf"
+
+calico_crd_manifest: "v1_crd_projectcalico_org-v3.32.1.yaml"
+calico_operator_manifest: "tigera-operator-v3.32.1.yaml"
+calico_custom_resources_manifest: "custom-resources-project-v3.32.1.yaml"
+
+calico_operator_namespace: "tigera-operator"
+calico_operator_deployment: "tigera-operator"
+
+calico_expected_cidr: "10.244.0.0/16"
+calico_expected_block_size: 26
+calico_expected_encapsulation: "VXLANCrossSubnet"
+calico_expected_nat_outgoing: "Enabled"
+calico_expected_bgp: "Disabled"
+calico_expected_mtu: 1450

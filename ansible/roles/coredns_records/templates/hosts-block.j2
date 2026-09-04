@@ -1,0 +1,8 @@
+# BEGIN ANSIBLE MANAGED PROJECT ENDPOINTS
+hosts {
+{% for endpoint in coredns_endpoint_records %}
+    {{ endpoint.value.address }} {{ endpoint.value.fqdn }}
+{% endfor %}
+    fallthrough
+}
+# END ANSIBLE MANAGED PROJECT ENDPOINTS

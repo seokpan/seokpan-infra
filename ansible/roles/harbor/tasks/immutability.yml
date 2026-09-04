@@ -1,0 +1,197 @@
+---
+# Harbor Project Tag Immutability
+# - 06 공식 설계의 Project Tag Immutability 요구사항 구현
+# - 동일 Tag가 다른 Image Digest로 덮어써지는 것을 방지
+# - 기존 동일 Rule이 있으면 재사용하고, disabled 상태면 활성화
+
+- name: Harbor Project ID 조회 (Immutability용)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: _harbor_immutability_project_lookup
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Harbor Project ID 확정
+  ansible.builtin.set_fact:
+    _harbor_immutability_project_id: >-
+      {{ (_harbor_immutability_project_lookup.json
+          | selectattr('name', 'equalto', harbor_project_name)
+          | map(attribute='project_id')
+          | first) }}
+
+- name: Harbor Project ID 검증
+  ansible.builtin.assert:
+    that:
+      - _harbor_immutability_project_id is defined
+      - (_harbor_immutability_project_id | string | length) > 0
+    fail_msg: >-
+      Harbor Project '{{ harbor_project_name }}'의 project_id를 확인할 수 없습니다.
+      harbor_project.yml이 먼저 실행되었는지 확인하세요.
+
+- name: 현재 Harbor Tag Immutability Rule 조회
+  ansible.builtin.uri:
+    url: >-
+      https://{{ harbor_hostname }}/api/v2.0/projects/
+      {{- _harbor_immutability_project_id }}/immutabletagrules
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: _harbor_immutability_rules
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: 동일 범위 Immutability Rule 검색 초기화
+  ansible.builtin.set_fact:
+    _harbor_matching_immutability_rule: {}
+
+- name: 동일 범위 Immutability Rule 검색
+  ansible.builtin.set_fact:
+    _harbor_matching_immutability_rule: "{{ item }}"
+  loop: "{{ _harbor_immutability_rules.json | default([]) }}"
+  loop_control:
+    label: "{{ item.id | default('no-id') }}"
+  when:
+    - item.action | default('') == 'immutable'
+    - item.template | default('') == 'immutable_template'
+    - >-
+      (item.tag_selectors | default([])
+       | selectattr('pattern', 'equalto', harbor_immutability_tag_pattern)
+       | list | length) > 0
+    - >-
+      (item.scope_selectors.repository | default([])
+       | selectattr('pattern', 'equalto', harbor_immutability_repository_pattern)
+       | list | length) > 0
+  no_log: true
+
+- name: Harbor Tag Immutability Rule 생성
+  ansible.builtin.uri:
+    url: >-
+      https://{{ harbor_hostname }}/api/v2.0/projects/
+      {{- _harbor_immutability_project_id }}/immutabletagrules
+    method: POST
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    body:
+      project_id: "{{ _harbor_immutability_project_id | int }}"
+      disabled: false
+      action: immutable
+      template: immutable_template
+      priority: 0
+      tag_selectors:
+        - kind: doublestar
+          decoration: matches
+          pattern: "{{ harbor_immutability_tag_pattern }}"
+      scope_selectors:
+        repository:
+          - kind: doublestar
+            decoration: repoMatches
+            pattern: "{{ harbor_immutability_repository_pattern }}"
+    status_code: 201
+  when:
+    - harbor_immutability_enabled | bool
+    - _harbor_matching_immutability_rule.id is not defined
+  register: _harbor_immutability_create
+  changed_when: true
+  no_log: true
+
+- name: 기존 동일 Immutability Rule 활성화
+  ansible.builtin.uri:
+    url: >-
+      https://{{ harbor_hostname }}/api/v2.0/projects/
+      {{- _harbor_immutability_project_id }}/immutabletagrules/
+      {{- _harbor_matching_immutability_rule.id }}
+    method: PUT
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    body:
+      project_id: "{{ _harbor_immutability_project_id | int }}"
+      disabled: false
+      action: immutable
+      template: immutable_template
+      priority: "{{ _harbor_matching_immutability_rule.priority | default(0) }}"
+      tag_selectors: "{{ _harbor_matching_immutability_rule.tag_selectors }}"
+      scope_selectors: "{{ _harbor_matching_immutability_rule.scope_selectors }}"
+    status_code: 200
+  when:
+    - harbor_immutability_enabled | bool
+    - _harbor_matching_immutability_rule.id is defined
+    - _harbor_matching_immutability_rule.disabled | default(false) | bool
+  register: _harbor_immutability_enable
+  changed_when: true
+  no_log: true
+
+- name: Immutability Rule 최종 상태 재조회
+  ansible.builtin.uri:
+    url: >-
+      https://{{ harbor_hostname }}/api/v2.0/projects/
+      {{- _harbor_immutability_project_id }}/immutabletagrules
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: _harbor_immutability_rules_after
+  no_log: true
+  when: 
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode
+  check_mode: false
+
+- name: 활성 Immutability Rule 검증 초기화
+  ansible.builtin.set_fact:
+    _harbor_immutability_active_verified: false
+  when: 
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode
+
+- name: 활성 Immutability Rule 검증
+  ansible.builtin.set_fact:
+    _harbor_immutability_active_verified: true
+  loop: "{{ _harbor_immutability_rules_after.json | default([]) }}"
+  loop_control:
+    label: "{{ item.id | default('no-id') }}"
+  when:
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode
+    - not (item.disabled | default(false) | bool)
+    - item.action | default('') == 'immutable'
+    - >-
+      (item.tag_selectors | default([])
+       | selectattr('pattern', 'equalto', harbor_immutability_tag_pattern)
+       | list | length) > 0
+    - >-
+      (item.scope_selectors.repository | default([])
+       | selectattr('pattern', 'equalto', harbor_immutability_repository_pattern)
+       | list | length) > 0
+  no_log: true
+
+- name: Harbor Tag Immutability 활성 상태 확인
+  ansible.builtin.assert:
+    that:
+      - _harbor_immutability_active_verified | bool
+    fail_msg: >-
+      Harbor Project '{{ harbor_project_name }}'의 Tag Immutability Rule이
+      활성 상태로 확인되지 않았습니다.
+    success_msg: >-
+      Harbor Project '{{ harbor_project_name }}' Tag Immutability Rule 활성 상태 확인 완료.
+  when: 
+    - harbor_immutability_enabled | bool
+    - not ansible_check_mode

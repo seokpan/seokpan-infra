@@ -1,0 +1,87 @@
+# 작성자: 석판팀
+#
+# 모든 그룹이 소비하는 비-Secret 공용 값.
+# Secret은 group_vars/all/vault.yml 등 암호화 경로에서 별도 관리한다.
+
+cluster_kubeconfig: "/etc/seokpan/kubeconfig/admin.conf"
+
+# ============================================================
+# Project Endpoint Contract
+#
+# - 공식 Service/Platform Endpoint의 Single Source of Truth
+# - common_hosts는 host_publish=true인 Endpoint를 /etc/hosts에 배포
+# - coredns_records는 coredns_publish=true인 Endpoint만 Pod DNS에 배포
+# - client_publish는 Browser/loadgen 등 Cluster 외부 Client가 해석해야 하는지 기록
+# - Deferred Endpoint는 이름 계약만 보존하고 실제 DNS/Route를 미리 활성화하지 않는다.
+# ============================================================
+
+project_endpoints:
+  harbor:
+    fqdn: "harbor.seokpan.soldesk.store"
+    address: "192.168.53.61"
+    ports: [443]
+    host_aliases: ["harbor", "hb"]
+    host_publish: true
+    coredns_publish: true
+    client_publish: false
+    status: "active"
+
+  db:
+    fqdn: "db.seokpan.soldesk.store"
+    address: "10.1.93.90"
+    ports: [3306]
+    host_aliases: []
+    host_publish: true
+    coredns_publish: true
+    client_publish: false
+    status: "active"
+
+  game:
+    fqdn: "game.seokpan.soldesk.store"
+    address: "10.1.93.90"
+    ports: [80, 443]
+    host_aliases: []
+    host_publish: true
+    coredns_publish: true
+    client_publish: true
+    status: "route_pending"
+
+  grafana:
+    fqdn: "grafana.seokpan.soldesk.store"
+    address: "10.1.93.90"
+    ports: [443]
+    host_aliases: []
+    host_publish: true
+    coredns_publish: true
+    client_publish: true
+    status: "runtime_pending"
+
+  kubernetes_api:
+    fqdn: "k8s-api.seokpan.soldesk.store"
+    address: "10.1.93.90"
+    ports: [6443]
+    host_aliases: []
+    host_publish: false
+    coredns_publish: false
+    client_publish: true
+    status: "pending_api_san"
+
+  jenkins:
+    fqdn: "jenkins.seokpan.soldesk.store"
+    address: "10.1.93.90"
+    ports: [443]
+    host_aliases: []
+    host_publish: false
+    coredns_publish: false
+    client_publish: true
+    status: "deferred_route"
+
+  argocd:
+    fqdn: "argocd.seokpan.soldesk.store"
+    address: "10.1.93.90"
+    ports: [443]
+    host_aliases: []
+    host_publish: false
+    coredns_publish: false
+    client_publish: true
+    status: "deferred_external_ui"

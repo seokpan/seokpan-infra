@@ -1,0 +1,72 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: repl_user/maxscale_monitor/backup_svc 계정 생성 및 권한 부여 (이슈 #89)
+#          - 실제 Master에서만 실행 (Replica 직접 조작 시 binlog replay 충돌 위험)
+#          - update_password: on_create → 기존 계정 비밀번호는 절대 덮어쓰지 않음
+#            (이슈 #54 비밀번호 분리 작업과 서로 간섭하지 않게 하기 위함.
+#             현재 repl_user/maxscale_monitor는 공유 해시 상태이며 #54에서
+#             개별 분리 예정 — 이 role은 그 전제를 건드리지 않는다)
+
+- name: repl_user 계정 생성 (Replica 복제 전용)
+  ansible.mariadb.mariadb_user:
+    name: repl_user
+    host: '%'
+    password: "{{ repl_user_password }}"
+    update_password: on_create
+    priv: "{{ repl_user_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  no_log: true
+
+- name: maxscale_monitor 계정 생성 (MaxScale 모니터링/failover 전용)
+  ansible.mariadb.mariadb_user:
+    name: maxscale_monitor
+    host: '%'
+    password: "{{ maxscale_monitor_password }}"
+    update_password: on_create
+    priv: "{{ maxscale_monitor_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  no_log: true
+
+# mysql 스키마 개별 테이블 SELECT는 SHOW GRANTS 실측에 별도 라인으로 존재하므로
+# 동일하게 개별 GRANT로 반영 (mysql.* SELECT와 중복이지만 실측 그대로 유지).
+# GRANT는 이미 멱등적이므로 changed_when: false로 Ansible 보고만 고정.
+- name: maxscale_monitor에 mysql 스키마 개별 테이블 SELECT 권한 부여
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    query: "GRANT SELECT ON mysql.{{ item }} TO 'maxscale_monitor'@'%'"
+  loop: "{{ maxscale_monitor_extra_grant_tables }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  changed_when: false
+
+- name: backup_svc 계정 생성 (mariadb-backup 전용, 신규)
+  ansible.mariadb.mariadb_user:
+    name: backup_svc
+    host: "{{ backup_svc_host }}"
+    password: "{{ backup_svc_password }}"
+    update_password: on_create
+    priv: "{{ backup_svc_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  no_log: true
+
+- name: 권한 즉시 반영
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    query: "FLUSH PRIVILEGES"
+  when: inventory_hostname == mariadb_master_inventory_hostname
+  changed_when: false

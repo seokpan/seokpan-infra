@@ -1,0 +1,6 @@
+---
+# Owner: 김상희
+- name: restart maxscale
+  ansible.builtin.systemd:
+    name: maxscale
+    state: restarted

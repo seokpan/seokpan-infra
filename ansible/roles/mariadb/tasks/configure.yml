@@ -1,0 +1,16 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: /etc/my.cnf.d/custom.cnf 배포
+#          read_only는 MaxScale enforce_read_only_slaves=true가 런타임에서 단독 관리하므로
+#          이 파일에는 포함하지 않는다 (E_infra_snapshot.md 3절 충돌 해결, 이슈 #50)
+
+- name: custom.cnf 배포
+  ansible.builtin.template:
+    src: custom.cnf.j2
+    dest: /etc/my.cnf.d/custom.cnf
+    owner: root
+    group: mysql
+    mode: "0640"
+  notify: restart mariadb

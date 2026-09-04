@@ -1,0 +1,39 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: maxctrl로 실제 Master를 재확인 (복구 검증 시 비교 기준 확보용, 이슈 #55)
+#          mariadb_account role의 동일 task와 로직이 중복됨 — 공용 role 분리는 별도 검토 필요
+
+- name: maxctrl list servers 조회 (maxscale-01에 위임)
+  ansible.builtin.command: maxctrl --tsv list servers
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: maxctrl_result
+
+- name: State 컬럼에 Master가 포함된 서버명 추출
+  ansible.builtin.set_fact:
+    mariadb_master_candidates: >-
+      {{ maxctrl_result.stdout_lines
+         | select('search', 'Master')
+         | map('regex_replace', '^([^\t]+)\t.*$', '\1')
+         | list }}
+  run_once: true
+
+- name: Master가 정확히 1개인지 검증
+  ansible.builtin.assert:
+    that:
+      - mariadb_master_candidates | length == 1
+    fail_msg: >-
+      Master 서버가 0개 또는 여러 개로 조회되었습니다: {{ mariadb_master_candidates }}
+  run_once: true
+
+- name: Master 호스트명을 mariadbs 그룹 전체 호스트에 공유
+  ansible.builtin.set_fact:
+    mariadb_master_inventory_hostname: "{{ mariadb_master_candidates[0] }}"
+  delegate_to: "{{ item }}"
+  delegate_facts: true
+  loop: "{{ groups['mariadbs'] }}"
+  run_once: true

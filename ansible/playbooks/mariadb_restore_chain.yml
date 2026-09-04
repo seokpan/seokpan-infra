@@ -1,0 +1,25 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: Full+Incremental 체인을 롤포워드 병합하여 격리 환경 Restore 및 표본 검증 (이슈 #114)
+#
+# 실행 예:
+#   ansible-playbook playbooks/mariadb_restore_chain.yml -l mariadb-02 --ask-vault-pass \
+#     -e backup_restore_chain_dir=chain_20260907_020000
+
+- name: MariaDB 체인(Full+Incremental) 격리 환경 Restore 및 표본 검증
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: 실제 Master 판별 (비교 기준 확보용)
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: detect_master
+
+    - name: 체인 롤포워드 복구 실행
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: restore_chain

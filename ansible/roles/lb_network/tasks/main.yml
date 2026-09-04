@@ -38,6 +38,7 @@
         | dict2items
         | selectattr('value', 'mapping')
         | selectattr('value.ipv4', 'defined')
+        | selectattr('value.ipv4', 'mapping')
         | selectattr(
             'value.ipv4.address',
             'equalto',
@@ -78,6 +79,7 @@
       - "{{ lb_external_interface }}"
   register: lb_connection_result
   changed_when: false
+  check_mode: false
 
 
 - name: Verify LB NetworkManager connection

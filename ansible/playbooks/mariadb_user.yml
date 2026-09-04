@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: repl_user/maxscale_monitor/backup_svc 계정 코드화 (이슈 #89)
+
+- name: MariaDB 인프라 계정(repl_user/maxscale_monitor/backup_svc) 코드화
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+
+  roles:
+    - mariadb_user

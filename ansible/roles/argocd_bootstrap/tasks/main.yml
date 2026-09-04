@@ -1,0 +1,137 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 08/28
+#
+# Role: argocd_bootstrap
+# 범위: Argo CD 자체 설치, Root Application(App-of-Apps) 등록
+# 소유권 경계: 설치 완료 후 Application Desired State는 Argo CD가 인수 (Ansible 재관리 X)
+#
+# 모든 태스크에 delegate_to: localhost — argocd_kubeconfig가 Ansible Controller
+# 자체에 위치하므로, Controller에서 직접 kubernetes.core를 실행한다.
+
+- name: Argo CD Namespace 존재 확인/생성 (멱등)
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ argocd_namespace }}"
+  delegate_to: localhost
+  become: false
+
+- name: Argo CD Release Manifest 다운로드
+  ansible.builtin.get_url:
+    url: "{{ argocd_manifest_url }}"
+    dest: "{{ argocd_manifest_local_path }}"
+    checksum: "{{ argocd_manifest_checksum | default(omit) }}"
+    mode: "0644"
+    force: false
+  delegate_to: localhost
+  become: false
+
+- name: "Argo CD Manifest Server-Side Apply (대형 CRD annotation 한도 회피, 재검증 대상)"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    namespace: "{{ argocd_namespace }}"
+    src: "{{ argocd_manifest_local_path }}"
+    state: present
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+      force_conflicts: true
+  register: argocd_apply_result
+  delegate_to: localhost
+  become: false
+
+- name: 대형 CRD 정상 생성 확인 (262144 byte 이슈 재검증)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ argocd_large_crds }}"
+  register: argocd_large_crd_check
+  failed_when: argocd_large_crd_check.resources | length == 0
+  delegate_to: localhost
+  become: false
+
+- name: Argo CD 핵심 Deployment Ready 대기
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    kind: Deployment
+    namespace: "{{ argocd_namespace }}"
+    name: "{{ item }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ argocd_ready_timeout }}"
+  loop:
+    - argocd-server
+    - argocd-repo-server
+    - argocd-applicationset-controller
+  delegate_to: localhost
+  become: false
+
+- name: Root Application 배포 (임시 Manifest 생성 → 적용 → 정리)
+  when: not ansible_check_mode
+  block:
+    - name: Root Application 임시 Manifest 파일 생성
+      ansible.builtin.tempfile:
+        state: file
+        prefix: "root-application-{{ argocd_namespace }}-"
+        suffix: ".yaml"
+      register: root_application_manifest_temp
+      delegate_to: localhost
+      become: false
+
+    - name: Root Application Manifest 생성
+      ansible.builtin.template:
+        src: root-application.yaml.j2
+        dest: "{{ root_application_manifest_temp.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+    - name: Root Application 등록/갱신
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        src: "{{ root_application_manifest_temp.path }}"
+        state: present
+        server_side_apply:
+          field_manager: "{{ argocd_field_manager }}"
+          force_conflicts: true
+      register: root_app_apply_result
+      delegate_to: localhost
+      become: false
+
+    - name: Root Application 임시 Manifest 제거
+      ansible.builtin.file:
+        path: "{{ root_application_manifest_temp.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    - name: Root Application Synced/Healthy 확인
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        name: "{{ root_application_name }}"
+        namespace: "{{ argocd_namespace }}"
+      register: root_app_info
+      until: >
+        (root_app_info.resources | length > 0) and
+        (root_app_info.resources[0].status.sync.status | default('')) == 'Synced' and
+        (root_app_info.resources[0].status.health.status | default('')) == 'Healthy'
+      retries: "{{ root_app_sync_retries }}"
+      delay: "{{ root_app_sync_delay }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Root Application 상태 출력 (Evidence 확인용)
+      ansible.builtin.debug:
+        msg: >-
+          root Application sync={{ root_app_info.resources[0].status.sync.status }}
+          health={{ root_app_info.resources[0].status.health.status }}

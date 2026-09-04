@@ -1,0 +1,14 @@
+---
+# Owner: 김상희
+# Purpose: /etc/maxscale.cnf 배포. read_only는 enforce_read_only_slaves=true로
+#          MaxScale이 단독 관리 (mariadb custom.cnf에는 read_only 항목 자체가 없음)
+
+- name: maxscale.cnf 배포
+  ansible.builtin.template:
+    src: maxscale.cnf.j2
+    dest: /etc/maxscale.cnf
+    owner: root
+    group: maxscale
+    mode: "0640"
+  notify: restart maxscale
+  diff: false

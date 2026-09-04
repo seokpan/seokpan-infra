@@ -1,0 +1,50 @@
+# Written by: CYJ 2026/09/01
+---
+# ------------------------------------------------------------
+# Controller kubeconfig access policy
+# ------------------------------------------------------------
+
+- name: Ensure ansible-kube group exists
+  ansible.builtin.group:
+    name: "{{ controller_kubeconfig_group }}"
+    system: true
+    state: present
+
+# ------------------------------------------------------------
+# Shared kubeconfig directory
+# ------------------------------------------------------------
+
+- name: Ensure shared kubeconfig directory exists
+  ansible.builtin.file:
+    path: "{{ controller_kubeconfig_path | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ controller_kubeconfig_group }}"
+    mode: "0750"
+
+# ------------------------------------------------------------
+# Retrieve admin.conf from first control plane
+# ------------------------------------------------------------
+
+- name: Read Kubernetes admin.conf from first control plane
+  ansible.builtin.slurp:
+    src: "{{ controller_kubeconfig_source_path }}"
+  delegate_to: "{{ controller_kubeconfig_source_host }}"
+  vars:
+    ansible_connection: ssh
+  become: true
+  register: controller_kubeconfig_content
+  no_log: true
+
+# ------------------------------------------------------------
+# Install shared kubeconfig on Controller
+# ------------------------------------------------------------
+
+- name: Install shared Kubernetes kubeconfig on Controller
+  ansible.builtin.copy:
+    content: "{{ controller_kubeconfig_content.content | b64decode }}"
+    dest: "{{ controller_kubeconfig_path }}"
+    owner: root
+    group: "{{ controller_kubeconfig_group }}"
+    mode: "0640"
+  no_log: true

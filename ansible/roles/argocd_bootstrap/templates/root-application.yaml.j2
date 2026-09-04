@@ -1,0 +1,25 @@
+{# 작성자: 최유준 #}
+{# 작성 날짜: 08/28 #}
+{# Root Application(App-of-Apps) — seokpan-gitops의 공식 Child Application 선언 경로 참조 #}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ root_application_name }}
+  namespace: {{ root_application_namespace }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ root_application_project }}
+  source:
+    repoURL: {{ gitops_repo_url }}
+    targetRevision: {{ gitops_repo_revision }}
+    path: {{ gitops_root_path }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ argocd_namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
