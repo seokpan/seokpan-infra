@@ -124,3 +124,11 @@ dr_healthcheck_credentials_file: /root/.dr_healthcheck_svc.cnf
 # custom.cnf(이슈 #50)보다 항상 나중에 읽히도록 함. role=replica로 정상 재편입되면
 # replication_setup.yml이 자동으로 제거함.
 dr_failsafe_read_only_cnf_path: /etc/my.cnf.d/zz-dr-failsafe-read-only.cnf
+# PR #133 3차 리뷰 반영(2026-09-04): Split-brain 방지 안전장치 배치 시, 도달
+# 불가(unreachable) 호스트를 자동으로 안전하다고 간주하지 않기 위한 명시적
+# 확인 목록. unreachable은 서버가 실제로 꺼져 있다는 보장이 아니므로(일시적
+# SSH/네트워크 장애일 수 있음), 사람이 직접 확인·fencing한 호스트 이름만
+# 여기 나열해야 해당 호스트에 한해 [6] Gate를 통과한다. 평소에는 빈 배열 유지 —
+# 실행할 때마다 extra-vars로 그때그때 확인한 호스트만 넘길 것(기본값에
+# 상시 등록하지 말 것).
+backup_restore_fenced_hosts: []

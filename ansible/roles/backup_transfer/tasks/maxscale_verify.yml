@@ -157,13 +157,12 @@
 # 바꾸는 게 아니라 "다음에 그 서버가 켜질 때"를 대비하는 것).
 
 - name: "[master] Split-brain 방지 — 같은 그룹 나머지 호스트에 임시 read_only 안전장치 배포"
-  # PR #133 2차 리뷰 반영: 기존 ignore_errors: true는 "대상 호스트가 진짜로
-  # 도달 불가"한 경우와 "호스트는 살아있는데 배치 자체가 실패"한 경우를 구분하지
-  # 못하고 둘 다 삼켰다. 후자는 위험하다 — 호스트가 살아있는데 안전장치가 안
-  # 심어진 채로, 사람 개입 없이 재기동되면 "고립 Master" 오판정 위험이 그대로
-  # 남기 때문이다. ignore_unreachable로 "진짜 도달 불가"만 정상 스킵하고,
-  # 그 외 실패는 block/rescue로 잡아 Play를 명시적으로 중단시켜 사람이 fencing
-  # 하지 않고는 다음 Checkpoint([7])로 진행할 수 없게 만든다(안전 Gate).
+  # PR #133 3차 리뷰 반영: "도달 불가(unreachable) = 안전"이라는 자동 등치가
+  # 틀렸다는 지적. unreachable은 서버가 물리적으로 꺼져 있다는 보장이 아니라
+  # 일시적 SSH/네트워크 장애일 수도 있고, 그 경우 MariaDB 프로세스는 실제로
+  # 살아있거나 곧 재기동될 수 있어 Split-brain 위험이 그대로 남는다. 따라서
+  # unreachable 호스트를 여기서 자동으로 안전 처리하지 않고, 결과를 register해
+  # 아래 Gate에서 사람의 명시적 확인(backup_restore_fenced_hosts)과 대조한다.
   block:
     - name: 안전장치 파일 배포
       ansible.builtin.template:
@@ -177,6 +176,7 @@
       loop_control:
         label: "{{ item }}"
       ignore_unreachable: true
+      register: dr_failsafe_deploy_result
   rescue:
     - name: "[master] 안전 Gate — 도달 가능한 호스트에서 배치 자체가 실패하면 Play 중단"
       ansible.builtin.fail:
@@ -191,18 +191,55 @@
             (b) 해당 호스트의 mariadb 서비스를 사람이 직접 중지(fencing)해
                 재기동 자체를 막은 뒤 원인 조사.
           원인 조사 후 --tags maxscale_verify 를 재실행하면 이 Gate부터 재검증됩니다.
-          (도달 불가 호스트는 이 실패에 해당하지 않습니다 — 정상적으로 스킵 처리되어
-          나중에 이 playbook으로 정식 복구할 때 자연히 해소됩니다.)
   when: backup_restore_role == 'master'
+
+- name: "[master] 도달 불가(unreachable) 호스트 식별"
+  ansible.builtin.set_fact:
+    dr_failsafe_unreachable_hosts: >-
+      {{ dr_failsafe_deploy_result.results
+         | default([])
+         | selectattr('unreachable', 'defined')
+         | map(attribute='item')
+         | list }}
+  when: backup_restore_role == 'master'
+
+- name: "[master] 사람이 명시적으로 확인한 fencing 대상과 대조"
+  ansible.builtin.set_fact:
+    dr_failsafe_unconfirmed_hosts: >-
+      {{ dr_failsafe_unreachable_hosts
+         | difference(backup_restore_fenced_hosts | default([])) }}
+  when: backup_restore_role == 'master'
+
+- name: "[master] 안전 Gate — 미확인 unreachable 호스트가 있으면 Play 중단"
+  # unreachable == 안전하게 격리됨으로 자동 등치하지 않는다(PR #133 3차 리뷰).
+  # 사람이 실제로 확인·fencing했다는 명시적 근거(backup_restore_fenced_hosts)
+  # 없이는 다음 Checkpoint([7])로 진행할 수 없다.
+  ansible.builtin.fail:
+    msg: >-
+      Split-brain 방지 안전장치를 다음 호스트에 배치하지 못했습니다(도달 불가):
+      {{ dr_failsafe_unconfirmed_hosts }}
+      도달 불가는 "안전하게 꺼져 있다"는 뜻이 아닙니다 — 일시적 SSH/네트워크
+      장애일 수 있고, 그 경우 MariaDB 프로세스가 실제로 살아있거나 곧 재기동될
+      수 있어 Split-brain(고립 Master 오판정) 위험이 그대로 남습니다.
+      다음 중 하나를 반드시 확인한 뒤에만 재실행하세요:
+        (a) 위 호스트에 실제로 접속(콘솔/IPMI 등)해 mariadb 서비스가 정지되어
+            있거나 재기동되지 않음을 직접 확인, 또는
+        (b) 위 호스트의 mariadb 서비스를 사람이 직접 중지(fencing).
+      확인 후 재실행 시 다음 extra-var로 확인 사실을 명시하세요:
+        -e backup_restore_fenced_hosts='{{ dr_failsafe_unconfirmed_hosts }}'
+      (실제로 재기동 가능한 상태였다면 이 값을 지정하지 마세요 — 사람이 실제로
+      확인한 경우에만 사용하는 명시적 확인 절차입니다.)
+  when: backup_restore_role == 'master' and dr_failsafe_unconfirmed_hosts | length > 0
 
 - name: "[master] 안전장치 배치 결과 안내 (Gate 통과 시에만 도달)"
   ansible.builtin.debug:
     msg: >-
       Split-brain 방지 안전장치를 {{ groups['mariadbs'] | difference([inventory_hostname]) }}에
-      배치 완료했습니다(도달 불가했던 호스트가 있었다면 정상 제외 처리 — 나중에
-      이 playbook으로 정식 복구할 때 자연히 해소됩니다). ⚠️ 이 안전장치가 배치된
-      호스트는, 반드시 이 playbook([4]~[5] role=replica)으로 정식 재편입해야
-      안전장치가 자동 해제됩니다 — 수동으로 my.cnf를 고쳐서 켜지 마세요.
+      배치 완료했습니다.{{ (' (사람이 명시적으로 fencing 확인한 호스트: ' +
+      (dr_failsafe_unreachable_hosts | string) + ')') if dr_failsafe_unreachable_hosts
+      | length > 0 else '' }} ⚠️ 이 안전장치가 배치된 호스트는, 반드시 이
+      playbook([4]~[5] role=replica)으로 정식 재편입해야 안전장치가 자동
+      해제됩니다 — 수동으로 my.cnf를 고쳐서 켜지 마세요.
   when: backup_restore_role == 'master'
 
 - name: 다음 단계 안내
