@@ -114,9 +114,18 @@ ansible-playbook playbooks/mariadb_restore_chain.yml -l <복구를_수행할_호
 실수 방지를 위해 자동화에 넣지 않았습니다.
 
 ```bash
+# [isolated] 격리 인스턴스 자체를 정리하는 경우
 systemctl stop mariadb-restore
-rm -rf /var/lib/mysql-restore-test /var/lib/mysql-restore-chain-working
+rm -rf /var/lib/mysql-restore-test
+
+# 체인 롤포워드 워킹 카피 — isolated/production 모드 공통으로 항상 생성됨(이슈 #119).
+# --prepare가 이 디렉터리 안에서 파일을 직접 변형시키므로 재사용 불가한 일회성 데이터.
+# --copy-back으로 필요한 내용은 이미 대상 datadir로 옮겨진 뒤이므로 항상 안전하게 삭제 가능.
+rm -rf /var/lib/mysql-restore-chain-working
 ```
+
+> production 모드(이슈 #119, [4])로 실행한 경우 `/var/lib/mysql-restore-test`는
+> 애초에 생성되지 않으므로, 위 중 체인 워킹 카피 삭제 한 줄만 해당됩니다.
 
 ## 사람이 하는 일 vs 자동화가 하는 일
 
