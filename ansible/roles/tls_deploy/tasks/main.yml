@@ -207,8 +207,8 @@
     path: "{{ tls_service_cert_path | dirname }}"
     state: directory
     owner: root
-    group: root
-    mode: "0750"
+    group: "{{ tls_service_dir_group }}"
+    mode: "{{ tls_service_dir_mode }}"
 
 - name: Read signed certificate from controller
   ansible.builtin.slurp:
@@ -240,8 +240,8 @@
     content: "{{ tls_key_content.content | b64decode }}"
     dest: "{{ tls_service_key_path }}"
     owner: root
-    group: root
-    mode: "0600"
+    group: "{{ tls_service_key_group }}"
+    mode: "{{ tls_service_key_mode }}"
   when: tls_needs_issue
   no_log: true
 
