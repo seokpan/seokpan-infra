@@ -24,5 +24,13 @@ internal_ca_organization: "seokpan"
 tls_service_days: 365
 tls_service_key_bits: 2048
 
+# 서비스별 TLS 소비 권한
+# 기본값은 기존 tls_deploy 동작을 그대로 유지한다.
+# 비-root 서비스는 host_vars에서 필요한 group/mode만 override한다.
+tls_service_dir_group: root
+tls_service_dir_mode: "0750"
+tls_service_key_group: root
+tls_service_key_mode: "0600"
+
 # Controller 쪽 작업 디렉토리 (호스트별 CSR/서명 결과 임시 보관)
 tls_work_dir: "{{ internal_ca_dir }}/issued/{{ tls_service_fqdn }}"
