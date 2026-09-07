@@ -1,0 +1,251 @@
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: [5] 복제 재구성 이후, MaxScale(MariaDB-Monitor)이 이 서버를 정상적으로
+#          다시 인식했는지 확인만 자동화한다 (이슈 #119 [6])
+#          - 신규 등록 작업 자체는 불필요(auto_rejoin=true로 모니터가 자동 인식) —
+#            여기서는 "확인"만 수행. 단, 크래시 이후 Maintenance 플래그가 남아있는
+#            경우에 한해 그 플래그만 해제(신규 서버 등록과는 다른 작업)한다.
+#          [PR #133 리뷰 반영] backup_restore_role=master인데 아직 MaxScale이
+#          Master로 인식하지 않은 경우(양쪽 다 유실 → 살아있는 Master가 아예 없어
+#          auto_failover가 스스로 판단할 근거가 없던 시나리오)에는, "확인"만으로
+#          끝내지 않고 MariaDB-Monitor failover를 명시적으로 트리거해 실제 승격까지
+#          수행한다. 이 경우에만 해당 — 이미 Master로 정상 인식된 일반적인 케이스
+#          (한쪽만 유실)에서는 기존과 동일하게 확인만 하고 별도 명령을 실행하지 않는다.
+
+- name: 단일 호스트 대상 여부 확인 (파괴적 작업은 아니지만 -l 관례 일관 적용)
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length == 1
+    fail_msg: >-
+      이 playbook은 -l 옵션으로 정확히 1개 호스트를 지정해서 실행하는 것을 권장합니다.
+      현재 대상: {{ ansible_play_hosts_all }}
+
+- name: backup_restore_role 확인 (기대 상태 판정에 사용)
+  ansible.builtin.assert:
+    that:
+      - backup_restore_role in ['master', 'replica']
+    fail_msg: >-
+      backup_restore_role(master 또는 replica)을 extra-vars로 지정할 것 — [5]에서 지정한
+      값과 동일하게 넘겨야 기대 상태를 정확히 판정할 수 있습니다.
+
+- name: maxctrl list servers 조회 (maxscale-01에 위임)
+  ansible.builtin.command: maxctrl --tsv list servers
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  changed_when: false
+  check_mode: false
+  register: dr_maxctrl_result
+
+- name: 이 서버에 해당하는 조회 결과 라인 추출
+  ansible.builtin.set_fact:
+    dr_maxctrl_own_line: >-
+      {{ dr_maxctrl_result.stdout_lines
+         | select('search', '^' + inventory_hostname + '\t')
+         | list
+         | first
+         | default('') }}
+
+- name: 조회 결과에 이 서버가 존재하는지 확인
+  ansible.builtin.assert:
+    that:
+      - dr_maxctrl_own_line | length > 0
+    fail_msg: >-
+      maxctrl list servers 결과에서 {{ inventory_hostname }}을 찾지 못했습니다.
+      MaxScale 설정(maxscale.cnf) 자체에 이 서버가 등록되어 있는지 먼저 확인하세요
+      (이 태스크는 "신규 등록"이 아니라 "재인식 확인"만 수행합니다).
+
+- name: Maintenance 플래그 잔존 여부 확인
+  ansible.builtin.set_fact:
+    dr_maxctrl_in_maintenance: "{{ 'Maintenance' in dr_maxctrl_own_line }}"
+
+- name: Maintenance 플래그 해제 (크래시 이전에 설정된 플래그가 남아있는 경우에만 — 신규 등록 아님)
+  ansible.builtin.command: "maxctrl clear server {{ inventory_hostname }} Maint"
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  when: dr_maxctrl_in_maintenance
+  changed_when: true
+
+- name: Maintenance 플래그 해제 후 재조회 (해제한 경우에만)
+  ansible.builtin.command: maxctrl --tsv list servers
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  when: dr_maxctrl_in_maintenance
+  changed_when: false
+  check_mode: false
+  register: dr_maxctrl_result_after_clear
+
+- name: 최종 조회 결과 라인 확정
+  ansible.builtin.set_fact:
+    dr_maxctrl_final_line: >-
+      {{ (dr_maxctrl_result_after_clear.stdout_lines
+          | select('search', '^' + inventory_hostname + '\t') | list | first)
+         if dr_maxctrl_in_maintenance else dr_maxctrl_own_line }}
+
+- name: 기대 상태 문자열 결정 (backup_restore_role 기준)
+  ansible.builtin.set_fact:
+    dr_maxctrl_expected_state: "{{ 'Master' if backup_restore_role == 'master' else 'Slave' }}"
+
+# ── master 역할인데 아직 Master로 인식되지 않은 경우 — 실제 승격 트리거 (PR #133 리뷰 반영) ──
+
+- name: master 역할인데 아직 Master로 인식되지 않았는지 확인 (양쪽 다 유실 시나리오)
+  ansible.builtin.set_fact:
+    dr_maxctrl_needs_failover: "{{ backup_restore_role == 'master' and 'Master' not in dr_maxctrl_final_line }}"
+
+- name: MariaDB-Monitor failover 강제 트리거
+  # 살아있는 Master가 없어 auto_failover가 스스로 판단할 근거가 없었던 경우에만 실행.
+  # failover는 "기존 Master가 죽었다"는 전제로 살아있는 후보 중 최적을 새 Master로
+  # 승격시키는 명령 — 이 시나리오에서는 복구 대상(이 서버)이 유일한 후보이므로
+  # 사실상 이 서버가 승격됨. (switchover가 아닌 failover를 쓰는 이유: switchover는
+  # "현재 살아있는 Master"가 있다는 전제의 계획된 전환이라 이 시나리오엔 맞지 않음)
+  ansible.builtin.command: "maxctrl call command mariadbmon failover {{ mariadb_monitor_name }}"
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  when: dr_maxctrl_needs_failover
+  changed_when: true
+  register: dr_failover_result
+  failed_when: false
+
+- name: failover 명령 실행 결과 확인
+  ansible.builtin.assert:
+    that:
+      - dr_failover_result.rc == 0
+    fail_msg: >-
+      MariaDB-Monitor failover 명령이 실패했습니다(rc={{ dr_failover_result.rc }}):
+      {{ dr_failover_result.stderr | default(dr_failover_result.stdout) }}
+      maxscale-01에서 'maxctrl call command mariadbmon failover {{ mariadb_monitor_name }}'를
+      직접 실행해 상태를 확인하세요. /var/log/maxscale/maxscale.log 로그도 함께 확인할 것.
+  when: dr_maxctrl_needs_failover
+
+- name: failover 이후 상태 안정화 대기
+  ansible.builtin.pause:
+    seconds: 5
+  when: dr_maxctrl_needs_failover
+
+- name: failover 이후 재조회
+  ansible.builtin.command: maxctrl --tsv list servers
+  delegate_to: "{{ mariadb_master_delegate_host }}"
+  when: dr_maxctrl_needs_failover
+  changed_when: false
+  check_mode: false
+  register: dr_maxctrl_result_after_failover
+
+- name: 최종 조회 결과 라인 재확정 (failover 실행한 경우 갱신)
+  ansible.builtin.set_fact:
+    dr_maxctrl_final_line: >-
+      {{ (dr_maxctrl_result_after_failover.stdout_lines
+          | select('search', '^' + inventory_hostname + '\t') | list | first)
+         if dr_maxctrl_needs_failover else dr_maxctrl_final_line }}
+
+- name: MaxScale 재인식 Gate (기대 역할 + Running 여부)
+  ansible.builtin.assert:
+    that:
+      - dr_maxctrl_expected_state in dr_maxctrl_final_line
+      - "'Running' in dr_maxctrl_final_line"
+    fail_msg: >-
+      MaxScale이 이 서버를 기대한 상태({{ dr_maxctrl_expected_state }}, Running)로
+      인식하지 못했습니다. 실제 조회 결과: {{ dr_maxctrl_final_line }}
+      (참고: TS-008 사례처럼 "Running=정상"이 Replication Channel 정상을 보장하지
+      않으므로, [5]의 SHOW SLAVE STATUS 결과와 함께 판단할 것)
+    success_msg: "MaxScale 재인식 확인: {{ dr_maxctrl_final_line }}"
+
+# ── Split-brain 방지 (PR #133 리뷰 반영, 2026-09-04 실측 검증 중 발견) ──────────
+#
+# 실측 확인: 복제 설정이 없고 read_only도 아닌 서버는, auto_failover 설정과
+# 무관하게 MaxScale이 즉시 "고립된 Master"로 판정한다(선출 행위가 아니라 상태
+# 관찰·라벨링이라 auto_failover가 관여하지 않음). 따라서 이 서버가 role=master로
+# 새 Master가 된 뒤, 같은 mariadbs 그룹의 나머지 호스트가 복제 재구성 없이 그냥
+# 기동되면 그 호스트도 똑같이 "고립된 Master"로 오판정되어 Split-brain이 발생할
+# 수 있음을 확인. 이를 막기 위해, 나머지 호스트에 "부팅 즉시 read_only로 시작"
+# 하는 임시 안전장치 파일을 미리 심어둔다(서비스 재기동은 하지 않음 — 지금 상태를
+# 바꾸는 게 아니라 "다음에 그 서버가 켜질 때"를 대비하는 것).
+
+- name: "[master] Split-brain 방지 — 같은 그룹 나머지 호스트에 임시 read_only 안전장치 배포"
+  # PR #133 3차 리뷰 반영: "도달 불가(unreachable) = 안전"이라는 자동 등치가
+  # 틀렸다는 지적. unreachable은 서버가 물리적으로 꺼져 있다는 보장이 아니라
+  # 일시적 SSH/네트워크 장애일 수도 있고, 그 경우 MariaDB 프로세스는 실제로
+  # 살아있거나 곧 재기동될 수 있어 Split-brain 위험이 그대로 남는다. 따라서
+  # unreachable 호스트를 여기서 자동으로 안전 처리하지 않고, 결과를 register해
+  # 아래 Gate에서 사람의 명시적 확인(backup_restore_fenced_hosts)과 대조한다.
+  block:
+    - name: 안전장치 파일 배포
+      ansible.builtin.template:
+        src: dr_failsafe_read_only.cnf.j2
+        dest: "{{ dr_failsafe_read_only_cnf_path }}"
+        owner: root
+        group: mysql
+        mode: "0640"
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mariadbs'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "{{ item }}"
+      ignore_unreachable: true
+      register: dr_failsafe_deploy_result
+  rescue:
+    - name: "[master] 안전 Gate — 도달 가능한 호스트에서 배치 자체가 실패하면 Play 중단"
+      ansible.builtin.fail:
+        msg: >-
+          Split-brain 방지 안전장치 배치가 실패했습니다(호스트는 도달 가능했으나
+          파일 배치 자체가 실패 — 디스크/권한 등 원인 확인 필요).
+          이 호스트는 현재 도달 가능한 상태이므로, 사람 개입 없이 나중에 재기동되면
+          복제 설정 없이 "고립된 Master"로 오판정될 위험이 그대로 남습니다.
+          다음 중 하나를 반드시 완료한 뒤에만 --tags checklist로 진행하세요:
+            (a) 실패한 호스트에 SSH로 직접 접속해
+                {{ dr_failsafe_read_only_cnf_path }}에 "read_only=1"을 수동 배치, 또는
+            (b) 해당 호스트의 mariadb 서비스를 사람이 직접 중지(fencing)해
+                재기동 자체를 막은 뒤 원인 조사.
+          원인 조사 후 --tags maxscale_verify 를 재실행하면 이 Gate부터 재검증됩니다.
+  when: backup_restore_role == 'master'
+
+- name: "[master] 도달 불가(unreachable) 호스트 식별"
+  ansible.builtin.set_fact:
+    dr_failsafe_unreachable_hosts: >-
+      {{ dr_failsafe_deploy_result.results
+         | default([])
+         | selectattr('unreachable', 'defined')
+         | map(attribute='item')
+         | list }}
+  when: backup_restore_role == 'master'
+
+- name: "[master] 사람이 명시적으로 확인한 fencing 대상과 대조"
+  ansible.builtin.set_fact:
+    dr_failsafe_unconfirmed_hosts: >-
+      {{ dr_failsafe_unreachable_hosts
+         | difference(backup_restore_fenced_hosts | default([])) }}
+  when: backup_restore_role == 'master'
+
+- name: "[master] 안전 Gate — 미확인 unreachable 호스트가 있으면 Play 중단"
+  # unreachable == 안전하게 격리됨으로 자동 등치하지 않는다(PR #133 3차 리뷰).
+  # 사람이 실제로 확인·fencing했다는 명시적 근거(backup_restore_fenced_hosts)
+  # 없이는 다음 Checkpoint([7])로 진행할 수 없다.
+  ansible.builtin.fail:
+    msg: >-
+      Split-brain 방지 안전장치를 다음 호스트에 배치하지 못했습니다(도달 불가):
+      {{ dr_failsafe_unconfirmed_hosts }}
+      도달 불가는 "안전하게 꺼져 있다"는 뜻이 아닙니다 — 일시적 SSH/네트워크
+      장애일 수 있고, 그 경우 MariaDB 프로세스가 실제로 살아있거나 곧 재기동될
+      수 있어 Split-brain(고립 Master 오판정) 위험이 그대로 남습니다.
+      다음 중 하나를 반드시 확인한 뒤에만 재실행하세요:
+        (a) 위 호스트에 실제로 접속(콘솔/IPMI 등)해 mariadb 서비스가 정지되어
+            있거나 재기동되지 않음을 직접 확인, 또는
+        (b) 위 호스트의 mariadb 서비스를 사람이 직접 중지(fencing).
+      확인 후 재실행 시 다음 extra-var로 확인 사실을 명시하세요:
+        -e backup_restore_fenced_hosts='{{ dr_failsafe_unconfirmed_hosts }}'
+      (실제로 재기동 가능한 상태였다면 이 값을 지정하지 마세요 — 사람이 실제로
+      확인한 경우에만 사용하는 명시적 확인 절차입니다.)
+  when: backup_restore_role == 'master' and dr_failsafe_unconfirmed_hosts | length > 0
+
+- name: "[master] 안전장치 배치 결과 안내 (Gate 통과 시에만 도달)"
+  ansible.builtin.debug:
+    msg: >-
+      Split-brain 방지 안전장치를 {{ groups['mariadbs'] | difference([inventory_hostname]) }}에
+      배치 완료했습니다.{{ (' (사람이 명시적으로 fencing 확인한 호스트: ' +
+      (dr_failsafe_unreachable_hosts | string) + ')') if dr_failsafe_unreachable_hosts
+      | length > 0 else '' }} ⚠️ 이 안전장치가 배치된 호스트는, 반드시 이
+      playbook([4]~[5] role=replica)으로 정식 재편입해야 안전장치가 자동
+      해제됩니다 — 수동으로 my.cnf를 고쳐서 켜지 마세요.
+  when: backup_restore_role == 'master'
+
+- name: 다음 단계 안내
+  ansible.builtin.debug:
+    msg: >-
+      [6] MaxScale 재편입 확인 완료. 다음 Checkpoint: --tags checklist 로 서비스 재개
+      전 최종 체크리스트(read_only 상태 + VIP 샘플 트랜잭션)를 확인하세요.
+      예: ansible-playbook playbooks/mariadb_dr_recovery.yml -l {{ inventory_hostname }}
+      --tags checklist --ask-vault-pass

@@ -1,0 +1,44 @@
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: [4] Master 자동 판별(detect_master.yml)이 실패해도 production 모드에서는
+#          Play를 즉시 죽이지 않고 계속 진행하도록 감싸는 공용 태스크 (PR #133 리뷰
+#          반영 — 양쪽 다 유실되어 Master가 0개인 최악의 시나리오 대응)
+#          - isolated 모드는 항상 살아있는 비교 대상 Master가 있다는 전제이므로,
+#            판별 실패 시 기존과 동일하게 하드 실패 유지
+#          - production 모드는 판별 실패를 mariadb_master_detected=false로 기록하고
+#            계속 진행 — 이후 restore_chain.yml의 Master 비교 태스크들은 이 플래그로 스킵
+
+- name: Master 자동 판별 시도 (실패해도 production 모드에서는 Play를 죽이지 않음)
+  block:
+    - name: maxctrl 기반 자동 판별
+      ansible.builtin.import_role:
+        name: backup_transfer
+        tasks_from: detect_master
+
+    - name: 판별 성공 플래그 설정
+      ansible.builtin.set_fact:
+        mariadb_master_detected: true
+  rescue:
+    - name: isolated 모드에서는 판별 실패를 그대로 실패 처리
+      ansible.builtin.assert:
+        that:
+          - backup_restore_mode | default('isolated') == 'production'
+        fail_msg: >-
+          Master 자동 판별에 실패했습니다(0개 또는 다수 조회됨). isolated 모드는 항상
+          정상적으로 살아있는 비교 대상 Master가 있다는 전제이므로, maxctrl list servers로
+          먼저 실제 상태를 확인하세요. (production 모드였다면 이 실패는 허용되어 계속
+          진행됩니다 — 양쪽 다 유실된 최악의 시나리오 대응, 이슈 #119/PR #133)
+
+    - name: production 모드 — 판별 실패를 허용하고 계속 진행
+      ansible.builtin.set_fact:
+        mariadb_master_detected: false
+
+    - name: 안내
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️ Master 자동 판별 실패 — 양쪽 다 유실된 시나리오로 판단하고 살아있는 비교
+          대상 없이 [4]를 진행합니다. Count/CHECKSUM 비교는 전부 스킵되며, SHA256SUMS
+          무결성 검증과 FK Gate만으로 백업본 자체의 정합성을 확인합니다. 이후 [5]에서는
+          반드시 backup_restore_role=master로 이 서버를 새 Master로 지정해야 하며,
+          [6]에서 MariaDB-Monitor failover를 통해 실제 승격이 이루어집니다.
