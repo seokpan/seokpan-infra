@@ -76,6 +76,7 @@
   # 임시 테이블은 이 커넥션 종료와 동시에 자동 삭제되므로 별도 DROP/정리 불필요
   ansible.builtin.command: >
     mariadb --defaults-extra-file={{ dr_healthcheck_credentials_file }}
+    --ssl-ca={{ dr_healthcheck_ssl_ca_path }} --ssl-verify-server-cert
     -e "CREATE TEMPORARY TABLE dr_healthcheck_tmp (id INT, checked_at DATETIME);
     INSERT INTO dr_healthcheck_tmp VALUES (1, NOW());
     SELECT * FROM dr_healthcheck_tmp;"
