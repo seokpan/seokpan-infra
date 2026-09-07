@@ -26,11 +26,11 @@
 │ seokpan-app   │  │seokpan-gitops │  │ seokpan-infra │
 │               │  │               │  │               │
 │ Application   │  │ Kubernetes    │  │ Infrastructure│
-│ Source        │  │ Desired State │  │ & Ansible    │
+│ Source        │  │ Desired State │  │ & Ansible     │
 └───────┬───────┘  └───────┬───────┘  └───────┬───────┘
-        │                   │                  │
-        │                   │                  │
-        ▼                   ▼                  ▼
+        │                  │                  │
+        │                  │                  │
+        ▼                  ▼                  ▼
     Application          Argo CD          On-premise
       Build             Deployment       Infrastructure
 ```
