@@ -26,7 +26,7 @@
 │ seokpan-app   │  │seokpan-gitops │  │ seokpan-infra │
 │               │  │               │  │               │
 │ Application   │  │ Kubernetes    │  │ Infrastructure│
-│ Source        │  │ Desired State │  │ & Ansible     │
+│ Source        │  │ Desired State │  │ & Ansible    │
 └───────┬───────┘  └───────┬───────┘  └───────┬───────┘
         │                   │                  │
         │                   │                  │
@@ -97,19 +97,19 @@ Infrastructure의 상세 Architecture와 실제 구성 기준은 아래 문서�
 
 `seokpan-infra`의 주요 책임 영역은 다음과 같습니다.
 
-| 영역              | 주요 역할                                    |
-|                   | ------------------------------------------- |
-| Host / VM         | Infrastructure Host 및 VM 기본 구성          |
+| 영역                | 주요 역할                                 |
+| ----------------- | ------------------------------------- |
+| Host / VM         | Infrastructure Host 및 VM 기본 구성        |
 | Network           | Network Configuration 및 Host 통신 기반 구성 |
-| VRouter           | Static Routing 및 Network 간 연결            |
-| Firewall          | Host 및 Infrastructure Network 접근 제어     |
-| Load Balancer     | HAProxy / Common VIP 기반 Traffic 전달       |
-| Kubernetes        | Cluster Bootstrap 및 기반 구성               |
-| Container Runtime | Kubernetes 실행 기반 구성                    |
-| Database          | MariaDB / MaxScale Infrastructure 구성      |
-| Storage / Backup  | NFS 및 Database Backup 기반 구성             |
-| Registry          | Harbor Infrastructure 구성                   |
-| Automation        | Ansible Playbook / Role 기반 자동화          |
+| VRouter           | Static Routing 및 Network 간 연결         |
+| Firewall          | Host 및 Infrastructure Network 접근 제어   |
+| Load Balancer     | HAProxy / Common VIP 기반 Traffic 전달    |
+| Kubernetes        | Cluster Bootstrap 및 기반 구성             |
+| Container Runtime | Kubernetes 실행 기반 구성                   |
+| Database          | MariaDB / MaxScale Infrastructure 구성  |
+| Storage / Backup  | NFS 및 Database Backup 기반 구성           |
+| Registry          | Harbor Infrastructure 구성              |
+| Automation        | Ansible Playbook / Role 기반 자동화        |
 | Validation        | Infrastructure 구성 및 상태 검증             |
 
 > Application의 소스코드와 Kubernetes Workload의 Desired State는 이 Repository에서 관리하지 않습니다.
