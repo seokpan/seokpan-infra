@@ -5,7 +5,7 @@
 # Purpose: Full+Incremental 체이닝 cron 스케줄 등록 (이슈 #114)
 #          - 일요일: Full, 그 외 요일: Incremental (동일 스크립트를 --mode 인자로 구분)
 
-- name: MariaDB Full 백업 cron 등록 (일요일)
+- name: MariaDB Full 백업 cron 등록 (수요일)
   ansible.builtin.cron:
     name: "seokpan mariadb chain full backup"
     weekday: "{{ backup_transfer_full_cron_weekday }}"
@@ -14,7 +14,7 @@
     job: "{{ backup_transfer_chain_script_path }} full >> {{ backup_transfer_log_dir }}/mariadb_backup_cron.log 2>&1"
     user: root
 
-- name: MariaDB Incremental 백업 cron 등록 (일요일 제외 매일)
+- name: MariaDB Incremental 백업 cron 등록 (수요일, 토요일, 일요일 제외 매일)
   ansible.builtin.cron:
     name: "seokpan mariadb chain incremental backup"
     weekday: "{{ backup_transfer_incr_cron_weekday }}"
