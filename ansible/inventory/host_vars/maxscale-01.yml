@@ -13,3 +13,10 @@ tls_service_fqdn: maxscale-01.seokpan.internal
 tls_service_san: "DNS:maxscale-01.seokpan.internal,DNS:db.seokpan.soldesk.store,IP:192.168.53.40,IP:10.1.93.90"
 tls_service_cert_path: "{{ maxscale_cert_path }}"
 tls_service_key_path: "{{ maxscale_key_path }}"
+
+# MaxScale TLS consumer-specific permission contract
+tls_service_dir_group: maxscale
+tls_service_dir_mode: "0750"
+
+tls_service_key_group: maxscale
+tls_service_key_mode: "0640"
