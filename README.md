@@ -1,604 +1,323 @@
 # seokpan-infra
 
-석판팀 1차 프로젝트의 **On-Premise 인프라 구성 및 Ansible 기반 인프라 자동화 Repository**입니다.
+석판팀 「石나가는 판단」 1차 프로젝트의 **On-premise Infrastructure 구성과 Ansible 기반 자동화 자산**을 관리하는 Repository입니다.
 
-본 Repository는 프로젝트 서비스 운영에 필요한 네트워크, 로드밸런서, Kubernetes, 데이터베이스, Container Registry 등의 인프라를 코드로 관리하고, 반복 가능한 구축 및 검증 환경을 만드는 것을 목적으로 합니다.
-
-> **Project:** 인프라 및 애플리케이션 자동화 프로젝트
-> **Repository:** `seokpan/seokpan-infra`
-> **Environment:** On-Premise / VMware 기반 Lab Environment
-> **Automation:** Ansible
-> **Container Platform:** Kubernetes
-> **Network:** VRouter / Static Routing / HAProxy / Common VIP
-> **Database:** MariaDB / MaxScale
-> **Registry:** Harbor
-> **Storage:** NFS
+본 Repository에서는 서비스가 실행되기 위한 Host, Network, Load Balancer, Kubernetes Cluster, Database 및 Infrastructure 구성요소를 관리하고, 이를 Ansible을 통해 자동화합니다.
 
 ---
 
-# 1. Project Overview
+## 1. Project Overview
 
-## 프로젝트 목적
+본 프로젝트는 On-premise 환경에서 **실시간 투표형 웹게임 서비스를 안정적으로 운영할 수 있는 Container Platform과 Infrastructure Automation 환경**을 구축하는 것을 목표로 합니다.
 
-본 프로젝트는 On-Premise 환경에서 웹 서비스를 운영하기 위한 전체 인프라를 구성하고, 이를 **Ansible 기반 IaC(Infrastructure as Code)** 형태로 자동화하는 것을 목표로 합니다.
-
-단순히 서버를 수동으로 구축하는 것이 아니라 다음과 같은 구조를 지향합니다.
+전체 프로젝트는 역할에 따라 다음 Repository로 분리하여 관리합니다.
 
 ```text
-Infrastructure
-      ↓
-Configuration
-      ↓
-Ansible Automation
-      ↓
+┌─────────────────────────────────────────────────────────┐
+│                    seokpan-docs                         │
+│          Project Design / Architecture / Baseline       │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+                           │
+        ┌──────────────────┼──────────────────┐
+        │                  │                  │
+        ▼                  ▼                  ▼
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│ seokpan-app   │  │seokpan-gitops │  │ seokpan-infra │
+│               │  │               │  │               │
+│ Application   │  │ Kubernetes    │  │ Infrastructure│
+│ Source        │  │ Desired State │  │ & Ansible    │
+└───────┬───────┘  └───────┬───────┘  └───────┬───────┘
+        │                   │                  │
+        │                   │                  │
+        ▼                   ▼                  ▼
+    Application          Argo CD          On-premise
+      Build             Deployment       Infrastructure
+```
+
+---
+
+## 2. Infrastructure Overview
+
+`seokpan-infra`에서는 Application이 실행될 수 있도록 다음과 같은 Infrastructure 영역을 구성합니다.
+
+```text
+                         Client
+                           │
+                           ▼
+                    Load Balancer / VIP
+                           │
+                           ▼
+                  Kubernetes / OKD Cluster
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+              ▼            ▼            ▼
+          Application     Redis       Platform
+              │
+              │
+              ▼
+           MaxScale
+              │
+        ┌─────┴─────┐
+        ▼           ▼
+     MariaDB     MariaDB
+        │
+        ▼
+      Backup
+        │
+        ▼
+   Backup Storage
+
+
+Network
+   │
+   ▼
+VRouter / Static Routing / Firewall
+
+
+Container Image
+   │
+   ▼
+Harbor
+   │
+   ▼
+Kubernetes
+```
+
+Infrastructure의 상세 Architecture와 실제 구성 기준은 아래 문서를 참고합니다.
+
+* [논리 Architecture](https://github.com/seokpan/seokpan-docs/blob/main/04_SeokPan_%EA%B8%B0%EC%88%A0_%EB%B9%84%EA%B5%90_%EB%B0%8F_%EB%85%BC%EB%A6%AC_%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98.pdf)
+* [물리 Architecture](https://github.com/seokpan/seokpan-docs/blob/main/05_SeokPan_%EB%AC%BC%EB%A6%AC_%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98.pdf)
+* [현재 MVP 구현 기준](https://github.com/seokpan/seokpan-docs/blob/main/MVP_IMPLEMENTATION_BASELINE.md)
+
+---
+
+## 3. Infrastructure Responsibilities
+
+`seokpan-infra`의 주요 책임 영역은 다음과 같습니다.
+
+| 영역                | 주요 역할                                 |
+| ----------------- | ------------------------------------- |
+| Host / VM         | Infrastructure Host 및 VM 기본 구성        |
+| Network           | Network Configuration 및 Host 통신 기반 구성 |
+| VRouter           | Static Routing 및 Network 간 연결         |
+| Firewall          | Host 및 Infrastructure Network 접근 제어   |
+| Load Balancer     | HAProxy / Common VIP 기반 Traffic 전달    |
+| Kubernetes        | Cluster Bootstrap 및 기반 구성             |
+| Container Runtime | Kubernetes 실행 기반 구성                   |
+| Database          | MariaDB / MaxScale Infrastructure 구성  |
+| Storage / Backup  | NFS 및 Database Backup 기반 구성           |
+| Registry          | Harbor Infrastructure 구성              |
+| Automation        | Ansible Playbook / Role 기반 자동화        |
+| Validation        | Infrastructure 구성 및 상태 검증             |
+
+> Application의 소스코드와 Kubernetes Workload의 Desired State는 이 Repository에서 관리하지 않습니다.
+
+---
+
+## 4. Repository Boundary
+
+프로젝트의 각 Repository는 다음과 같이 책임을 분리합니다.
+
+| Repository                                                          | 책임                                                                        |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [seokpan-infra](https://github.com/seokpan/seokpan-infra/tree/main) | Host / VM / Network / Infrastructure / Kubernetes Bootstrap / Ansible     |
+| [seokpan-gitops](https://github.com/seokpan/seokpan-gitops)         | Kubernetes Desired State / Argo CD / Platform / Application Deployment    |
+| [seokpan-app](https://github.com/seokpan/seokpan-app)               | Frontend / Backend Application Source 및 Test                              |
+| [seokpan-docs](https://github.com/seokpan/seokpan-docs)             | Project Design / Architecture / Implementation Baseline / Troubleshooting |
+
+### Repository 간 흐름
+
+```text
+seokpan-app
+     │
+     │ Application Source
+     ▼
+Container Build
+     │
+     ▼
+Harbor
+     │
+     ▼
+seokpan-gitops
+     │
+     │ Kubernetes Desired State
+     ▼
+Argo CD
+     │
+     ▼
+Kubernetes / OKD
+     ▲
+     │
+     │ Cluster / Host / Network
+     │
+seokpan-infra
+
+
+seokpan-docs
+     │
+     └── Project-wide Design / Architecture / Baseline
+```
+
+각 Repository의 상세 책임 범위는 각 Repository의 README를 참고합니다.
+
+* [seokpan-gitops README](https://github.com/seokpan/seokpan-gitops/blob/main/README.md)
+* [seokpan-app README](https://github.com/seokpan/seokpan-app/blob/main/README.md)
+* [seokpan-docs README](https://github.com/seokpan/seokpan-docs/blob/main/README.md)
+
+---
+
+## 5. Ansible Automation
+
+Infrastructure 구성은 Ansible을 기반으로 자동화합니다.
+
+기본적인 자동화 구조는 다음과 같습니다.
+
+```text
+Inventory
+    │
+    ▼
+Playbook
+    │
+    ▼
+Role
+    │
+    ├── Tasks
+    ├── Templates
+    ├── Handlers
+    ├── Files
+    └── Variables
+    │
+    ▼
+Target Host
+```
+
+Infrastructure 변경은 가능한 한 **재현 가능한 Ansible 코드**로 관리하는 것을 기본 방향으로 합니다.
+
+현재 자동화 대상에는 다음 영역이 포함됩니다.
+
+```text
+Common Configuration
+        │
+        ▼
+Network / VRouter / Routing
+        │
+        ▼
+Firewall
+        │
+        ▼
+Load Balancer / VIP
+        │
+        ▼
+Container Runtime
+        │
+        ▼
+Kubernetes Bootstrap
+        │
+        ▼
+Infrastructure Services
+        │
+        ▼
 Validation
-      ↓
-Repeatable Deployment
 ```
 
-즉, 실제 환경에서 구축한 인프라를 Ansible Playbook과 Role로 코드화하여 동일하거나 유사한 환경을 반복적으로 구성할 수 있도록 만드는 것이 핵심입니다.
+Ansible 자동화 및 테스트 설계에 대한 프로젝트 기준은 다음 문서를 참고합니다.
 
-## 주요 구성 영역
-
-* VRouter 및 Static Routing
-* Firewall 정책
-* HAProxy Load Balancer
-* Common VIP
-* Kubernetes Cluster
-* Calico CNI
-* Container Runtime
-* MariaDB
-* MaxScale
-* Harbor Container Registry
-* NFS Storage
-* Internal CA / CA Trust
-* ArgoCD Bootstrap
-* Kubernetes Add-ons
-* Infrastructure Validation
+* [Ansible 자동화·테스트 설계](https://github.com/seokpan/seokpan-docs/blob/main/06_SeokPan_Ansible_%EC%9E%90%EB%8F%99%ED%99%94_%ED%85%8C%EC%8A%A4%ED%8A%B8_%EC%84%A4%EA%B3%84.pdf)
+* [Ansible Inventory](https://github.com/seokpan/seokpan-infra/tree/main/ansible/inventory)
+* [Ansible Playbooks](https://github.com/seokpan/seokpan-infra/tree/main/ansible/playbooks)
+* [Ansible Roles](https://github.com/seokpan/seokpan-infra/tree/main/ansible/roles)
 
 ---
 
-# 2. Architecture
+## 6. Repository Structure
 
-## 전체 인프라 구조
-
-```mermaid
-flowchart TB
-
-    User["External User"]
-
-    subgraph Network["On-Premise Network"]
-
-        VRouter["VRouter Cluster<br/>vrouter-01 ~ vrouter-04<br/>Static Routing / Firewall"]
-
-        LB["Load Balancer<br/>lb-01<br/>HAProxy / Common VIP"]
-
-        subgraph K8s["Kubernetes Cluster"]
-
-            CP1["Control Plane 01"]
-            CP2["Control Plane 02"]
-            CP3["Control Plane 03"]
-
-            W1["Worker 01"]
-            W2["Worker 02"]
-
-            Calico["Calico CNI"]
-
-            CP1 --- CP2
-            CP2 --- CP3
-            CP1 --- CP3
-
-            CP1 --> W1
-            CP2 --> W1
-            CP2 --> W2
-            CP3 --> W2
-
-            Calico -.-> CP1
-            Calico -.-> W1
-            Calico -.-> W2
-        end
-
-        subgraph Data["Data Platform"]
-
-            DB1["MariaDB 01"]
-            DB2["MariaDB 02"]
-            MS["MaxScale 01"]
-
-            DB1 <-->|Replication| DB2
-            MS --> DB1
-            MS --> DB2
-        end
-
-        Harbor["Harbor<br/>Container Registry"]
-
-        NFS["NFS<br/>Shared Storage"]
-
-        Ansible["Ansible Controller"]
-    end
-
-    User --> VRouter
-    VRouter --> LB
-    LB --> W1
-    LB --> W2
-
-    K8s --> DB1
-    K8s --> MS
-    K8s --> Harbor
-    K8s --> NFS
-
-    Ansible -.->|Automation| VRouter
-    Ansible -.->|Automation| LB
-    Ansible -.->|Automation| K8s
-    Ansible -.->|Automation| DB1
-    Ansible -.->|Automation| DB2
-    Ansible -.->|Automation| MS
-    Ansible -.->|Automation| Harbor
-    Ansible -.->|Automation| NFS
-```
-
-### Architecture 구성
-
-```text
-                    External User
-                         │
-                         ▼
-                ┌─────────────────┐
-                │     VRouter     │
-                │ Routing/Firewall│
-                └────────┬────────┘
-                         │
-                         ▼
-                ┌─────────────────┐
-                │ HAProxy + VIP    │
-                │ Load Balancer    │
-                └────────┬────────┘
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-       ┌─────────────┐       ┌─────────────┐
-       │ K8s Worker 1│       │ K8s Worker 2│
-       └──────┬──────┘       └──────┬──────┘
-              │                     │
-              └──────────┬──────────┘
-                         │
-                  Kubernetes Cluster
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-       MariaDB         MaxScale       Harbor
-       Cluster                        Registry
-          │
-          ▼
-         NFS
-       Storage
-```
-
----
-
-# 3. Infrastructure
-
-현재 프로젝트는 **총 16VM**을 기반으로 구성합니다.
-
-| Category      | Host        | IP            | Role               | 주요 역할                       |
-| ------------- | ----------- | ------------- | ------------------ | --------------------------- |
-| Network       | vrouter-01  | 10.1.93.71    | VRouter            | Routing / Firewall          |
-| Network       | vrouter-02  | 10.1.93.73    | VRouter            | Routing / Firewall          |
-| Network       | vrouter-03  | 10.1.93.75    | VRouter            | Routing / Firewall          |
-| Network       | vrouter-04  | 10.1.93.77    | VRouter            | Routing / Firewall          |
-| Kubernetes    | cp-01       | 192.168.51.20 | Control Plane      | Kubernetes Control Plane    |
-| Kubernetes    | cp-02       | 192.168.52.20 | Control Plane      | Kubernetes Control Plane    |
-| Kubernetes    | cp-03       | 192.168.53.20 | Control Plane      | Kubernetes Control Plane    |
-| Kubernetes    | worker-01   | 192.168.51.30 | Worker             | Application Workload        |
-| Kubernetes    | worker-02   | 192.168.52.30 | Worker             | Application Workload        |
-| Database      | mariadb-01  | 192.168.52.40 | MariaDB            | Database Node               |
-| Database      | mariadb-02  | 192.168.51.40 | MariaDB            | Database Node / Replication |
-| Database      | maxscale-01 | 192.168.53.40 | MaxScale           | DB Proxy / Routing          |
-| Load Balancer | lb-01       | 10.1.93.78    | HAProxy            | Load Balancing / Common VIP |
-| Registry      | harbor      | 192.168.53.61 | Harbor             | Container Image Registry    |
-| Storage       | nfs         | 192.168.54.50 | NFS                | Shared Storage / Backup     |
-| Management    | ansible     | 192.168.54.70 | Ansible Controller | Infrastructure Automation   |
-
-> IP 및 Host 정보는 현재 Ansible Inventory 기준입니다. Inventory 변경 시 본 문서의 Infrastructure Table도 함께 갱신합니다.
-
----
-
-# 4. Repository Structure
-
-현재 Repository는 Ansible의 **Inventory → Playbook → Role** 구조를 중심으로 구성되어 있습니다.
+현재 Infrastructure 자동화 자산은 `ansible/` 아래에서 관리합니다.
 
 ```text
 seokpan-infra/
 │
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
-│   │   └── task.md
 │   └── pull_request_template.md
 │
 ├── ansible/
-│   │
-│   ├── ansible.cfg
-│   │
 │   ├── bootstrap/
-│   │   ├── README.md
-│   │   └── version_lock_bootstrap.sh
 │   │
 │   ├── inventory/
-│   │   ├── hosts.yml
-│   │   │
-│   │   ├── group_vars/
-│   │   │   └── all/
-│   │   │       ├── vars.yml
-│   │   │       └── vault.yml
-│   │   │
-│   │   └── host_vars/
-│   │       ├── harbor/
-│   │       ├── lb-01/
-│   │       ├── mariadb-01/
-│   │       ├── mariadb-02/
-│   │       ├── vrouter-01/
-│   │       ├── vrouter-02/
-│   │       ├── vrouter-03/
-│   │       └── vrouter-04/
 │   │
 │   ├── playbooks/
-│   │   ├── argocd_bootstrap.yml
-│   │   ├── ca_trust.yml
-│   │   ├── check.yml
-│   │   ├── common.yml
-│   │   ├── common_hosts.yml
-│   │   ├── container_runtime.yml
-│   │   ├── controller_kubeconfig.yml
-│   │   ├── harbor.yml
-│   │   ├── internal_ca.yml
-│   │   ├── kubernetes_addons.yml
-│   │   ├── kubernetes_calico.yml
-│   │   ├── kubernetes_cluster.yml
-│   │   ├── kubernetes_prereq.yml
-│   │   └── kubernetes_validate.yml
 │   │
-│   └── roles/
-│       ├── argocd_bootstrap/
-│       ├── ca_trust/
-│       ├── calico/
-│       ├── common/
-│       ├── common_hosts/
-│       ├── container_runtime/
-│       ├── controller_kubeconfig/
-│       ├── harbor/
-│       ├── internal_ca/
-│       ├── jenkins_secrets/
-│       ├── k8s_addons/
-│       ├── kubeadm_control_plane/
-│       ├── kubeadm_control_plane_join/
-│       ├── kubeadm_worker/
-│       ├── kubernetes_prereq/
-│       ├── lb_haproxy/
-│       └── ...
+│   ├── roles/
+│   │
+│   ├── ansible.cfg
+│   ├── requirements.txt
+│   └── requirements.yml
 │
 ├── .gitignore
 └── README.md
 ```
 
-## 주요 디렉터리 역할
+각 영역의 역할은 다음과 같습니다.
 
-### `.github/`
+| 경로                       | 역할                            |
+| ------------------------ | ----------------------------- |
+| `ansible/bootstrap/`     | Ansible 실행 환경 초기 구성           |
+| `ansible/inventory/`     | 대상 Host 및 환경별 변수              |
+| `ansible/playbooks/`     | Infrastructure 작업 실행 단위       |
+| `ansible/roles/`         | 기능별 자동화 구현                    |
+| `ansible/ansible.cfg`    | Ansible 실행 설정                 |
+| `ansible/requirements.*` | Ansible Dependency 관리         |
+| `.github/`               | Issue / Pull Request Workflow |
 
-GitHub 협업에 필요한 Issue Template 및 Pull Request Template을 관리합니다.
+---
+
+## 7. Infrastructure Deployment Flow
+
+Infrastructure 구성은 구성요소 간 의존관계를 고려하여 단계적으로 진행합니다.
 
 ```text
-.github/
-├── ISSUE_TEMPLATE/
-│   └── task.md
-└── pull_request_template.md
+Bootstrap
+   │
+   ▼
+Common Host Configuration
+   │
+   ▼
+Network / VRouter / Routing
+   │
+   ▼
+Firewall
+   │
+   ▼
+Load Balancer / VIP
+   │
+   ▼
+Container Runtime
+   │
+   ▼
+Kubernetes Bootstrap
+   │
+   ▼
+Infrastructure Services
+   │
+   ├── Database
+   ├── Registry
+   ├── Storage
+   └── 기타 Infrastructure
+   │
+   ▼
+Validation
 ```
 
-### `ansible/inventory/`
+실제 프로젝트의 구현 순서 및 현재 적용 기준은 다음 문서를 우선하여 확인합니다.
 
-관리 대상 서버와 환경별 변수를 관리합니다.
-
-```text
-inventory/
-├── hosts.yml
-├── group_vars/
-└── host_vars/
-```
-
-* `hosts.yml` : 서버 그룹 및 접속 정보
-* `group_vars/` : 그룹 공통 변수
-* `host_vars/` : 특정 Host 전용 변수
-* `vault.yml` : Password 등 민감정보 관리
-
-### `ansible/playbooks/`
-
-인프라 구성 작업의 실행 진입점입니다.
-
-예:
-
-```text
-kubernetes_prereq.yml
-        ↓
-container_runtime.yml
-        ↓
-kubernetes_cluster.yml
-        ↓
-kubernetes_calico.yml
-        ↓
-kubernetes_addons.yml
-        ↓
-kubernetes_validate.yml
-```
-
-### `ansible/roles/`
-
-실제 구성 작업을 기능 단위로 분리합니다.
-
-예:
-
-```text
-kubeadm_control_plane
-kubeadm_control_plane_join
-kubeadm_worker
-calico
-container_runtime
-lb_haproxy
-harbor
-argocd_bootstrap
-```
-
-Playbook이 **"무엇을 실행할 것인가"**를 정의한다면 Role은 **"어떻게 구성할 것인가"**를 담당합니다.
+* [MVP Implementation Baseline](https://github.com/seokpan/seokpan-docs/blob/main/MVP_IMPLEMENTATION_BASELINE.md)
+* [Project Changes](https://github.com/seokpan/seokpan-docs/blob/main/PROJECT_CHANGES.md)
 
 ---
 
-# 5. Deployment Order
-
-전체 인프라는 의존성을 고려하여 다음 순서로 구축하는 것을 기본 원칙으로 합니다.
-
-```text
-┌──────────────────────────────┐
-│ 1. Bootstrap                 │
-│ OS / Repository / SSH / 기본환경 │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 2. Common Configuration      │
-│ Hostname / Hosts / 공통 설정 │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 3. Network                   │
-│ VRouter / Static Routing     │
-│ Firewall                     │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 4. Load Balancer             │
-│ HAProxy / Common VIP         │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 5. Kubernetes Prerequisite   │
-│ Kernel / Sysctl / Packages   │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 6. Container Runtime         │
-│ containerd                   │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 7. Kubernetes Cluster        │
-│ Control Plane / Worker       │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 8. CNI                       │
-│ Calico                       │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 9. Kubernetes Add-ons        │
-│ Cluster Add-ons              │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 10. Platform Services        │
-│ Harbor / Internal CA         │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 11. Data Platform            │
-│ MariaDB / MaxScale / NFS     │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 12. Delivery Platform        │
-│ ArgoCD / Jenkins             │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ 13. Validation               │
-│ Infrastructure Validation    │
-└──────────────────────────────┘
-```
-
-## 주요 실행 순서
-
-### 1. Bootstrap
-
-```bash
-cd ansible
-
-ansible-playbook playbooks/common_hosts.yml
-```
-
-OS 및 Ansible 실행에 필요한 기본 환경을 준비합니다.
-
----
-
-### 2. Kubernetes Prerequisite
-
-```bash
-ansible-playbook playbooks/kubernetes_prereq.yml
-```
-
-Kubernetes 노드에 필요한 OS 및 Kernel 설정을 구성합니다.
-
----
-
-### 3. Container Runtime
-
-```bash
-ansible-playbook playbooks/container_runtime.yml
-```
-
-Kubernetes에서 사용할 `containerd` 환경을 구성합니다.
-
----
-
-### 4. Kubernetes Cluster
-
-```bash
-ansible-playbook playbooks/kubernetes_cluster.yml
-```
-
-Control Plane 및 Worker Node를 이용하여 Kubernetes Cluster를 구성합니다.
-
----
-
-### 5. Calico
-
-```bash
-ansible-playbook playbooks/kubernetes_calico.yml
-```
-
-Kubernetes Pod Network를 위한 Calico CNI를 구성합니다.
-
----
-
-### 6. Kubernetes Add-ons
-
-```bash
-ansible-playbook playbooks/kubernetes_addons.yml
-```
-
-Cluster 운영에 필요한 Add-on을 구성합니다.
-
----
-
-### 7. Harbor
-
-```bash
-ansible-playbook playbooks/harbor.yml
-```
-
-Container Image Registry 환경을 구성합니다.
-
----
-
-### 8. Internal CA / CA Trust
-
-```bash
-ansible-playbook playbooks/internal_ca.yml
-
-ansible-playbook playbooks/ca_trust.yml
-```
-
-내부 인증서 및 각 노드의 CA Trust 환경을 구성합니다.
-
----
-
-### 9. ArgoCD
-
-```bash
-ansible-playbook playbooks/argocd_bootstrap.yml
-```
-
-GitOps 기반 배포 환경을 위한 ArgoCD Bootstrap을 수행합니다.
-
----
-
-### 10. Validation
-
-```bash
-ansible-playbook playbooks/kubernetes_validate.yml
-```
-
-구축된 Kubernetes 환경의 주요 상태를 검증합니다.
-
----
-
-# 6. Current Status
-
-현재 프로젝트는 **Infrastructure 구축 상태와 Ansible Automation 구현 상태를 별도로 관리**합니다.
-
-> `Infrastructure`가 실제 서버에 구축되어 있다고 해서 해당 환경이 Ansible로 완전히 재현 가능한 것은 아닙니다.
-
-## 6.1 Infrastructure Status
-
-| 영역            | 구성 요소             | 상태      |
-| ------------- | ----------------- | ------- |
-| Network       | 4 × VRouter       | 🟢 구성   |
-| Network       | Static Routing    | 🟢 구성   |
-| Network       | Firewall          | 🟢 구성   |
-| Load Balancer | HAProxy           | 🟢 구성   |
-| Load Balancer | Common VIP        | 🟢 구성   |
-| Kubernetes    | 3 × Control Plane | 🟢 구성   |
-| Kubernetes    | 2 × Worker        | 🟢 구성   |
-| Kubernetes    | Calico            | 🟢 구성   |
-| Database      | MariaDB 01        | 🟢 구성   |
-| Database      | MariaDB 02        | 🟢 구성   |
-| Database      | MaxScale          | 🟢 구성   |
-| Registry      | Harbor            | 🟡 진행 중 |
-| Storage       | NFS               | 🟡 진행 중 |
-| Delivery      | ArgoCD            | 🟡 진행 중 |
-| Delivery      | Jenkins           | 🟡 진행 중 |
-| Monitoring    | Monitoring Stack  | 🟡 진행 중 |
-
----
-
-## 6.2 Ansible Automation Status
-
-| 영역            | Playbook / Role                     | 자동화 상태 |
-| ------------- | ----------------------------------- | ------ |
-| Common        | `common_hosts.yml` / `common_hosts` | 🟢     |
-| Network       | VRouter Network / Routing           | 🟡     |
-| Network       | VRouter Firewall                    | 🟡     |
-| Load Balancer | `lb_haproxy`                        | 🟢     |
-| Kubernetes    | `kubernetes_prereq`                 | 🟢     |
-| Kubernetes    | `container_runtime`                 | 🟢     |
-| Kubernetes    | `kubeadm_control_plane`             | 🟢     |
-| Kubernetes    | `kubeadm_control_plane_join`        | 🟢     |
-| Kubernetes    | `kubeadm_worker`                    | 🟢     |
-| Kubernetes    | `calico`                            | 🟢     |
-| Kubernetes    | `k8s_addons`                        | 🟢     |
-| Kubernetes    | Validation                          | 🟢     |
-| Registry      | `harbor`                            | 🟢     |
-| Security      | `internal_ca`                       | 🟢     |
-| Security      | `ca_trust`                          | 🟢     |
-| Delivery      | `argocd_bootstrap`                  | 🟢     |
-| Delivery      | `jenkins_secrets`                   | 🟡     |
-| Database      | MariaDB / MaxScale                  | 🟡     |
-| Storage       | NFS                                 | 🟡     |
-
-### Status 기준
-
-```text
-🟢 완료
-   └─ Playbook / Role 구현 및 테스트가 완료된 영역
-
-🟡 진행 중
-   └─ 구현 또는 테스트가 진행 중인 영역
-
-⚪ 예정
-   └─ 향후 자동화 대상
-
-🔴 문제 발생
-   └─ 현재 해결이 필요한 영역
-```
-
----
-
-# 7. Ansible Execution
+## 8. Working Directory
 
 Ansible 작업은 `ansible/` 디렉터리를 기준으로 수행합니다.
 
@@ -606,235 +325,244 @@ Ansible 작업은 `ansible/` 디렉터리를 기준으로 수행합니다.
 cd ansible
 ```
 
-## Inventory 확인
+기본적인 Playbook 실행 형태는 다음과 같습니다.
 
 ```bash
-ansible-inventory -i inventory/hosts.yml --graph
+ansible-playbook -i inventory/hosts.yml playbooks/<playbook>.yml
 ```
 
-## Host 연결 확인
+구체적인 실행 방법은 각 Playbook 또는 Role의 README와 작업 문서를 참고합니다.
 
-```bash
-ansible all -i inventory/hosts.yml -m ping
-```
-
-## Playbook 문법 검사
-
-```bash
-ansible-playbook \
-  -i inventory/hosts.yml \
-  playbooks/kubernetes_cluster.yml \
-  --syntax-check
-```
-
-## Check Mode
-
-실제 변경 없이 예상 변경사항을 확인합니다.
-
-```bash
-ansible-playbook \
-  -i inventory/hosts.yml \
-  playbooks/kubernetes_cluster.yml \
-  --check --diff
-```
-
-## Playbook 실행
-
-```bash
-ansible-playbook \
-  -i inventory/hosts.yml \
-  playbooks/kubernetes_cluster.yml
-```
+* [Playbooks](https://github.com/seokpan/seokpan-infra/tree/main/ansible/playbooks)
+* [Roles](https://github.com/seokpan/seokpan-infra/tree/main/ansible/roles)
 
 ---
 
-# 8. Security
+## 9. Validation
 
-Repository에는 다음과 같은 민감정보를 저장하지 않습니다.
+Infrastructure 자동화는 Ansible 실행 결과만으로 완료 여부를 판단하지 않습니다.
+
+```text
+Automation
+    │
+    ▼
+Configuration Applied
+    │
+    ▼
+Service / Network Validation
+    │
+    ▼
+Integration Validation
+    │
+    ▼
+Operational Validation
+```
+
+즉,
+
+> **Ansible이 성공했다 = Infrastructure가 정상이다**
+
+로 판단하지 않고 실제 Host, Network, Service 및 구성요소 간 연결 상태를 함께 확인합니다.
+
+세부 검증 기준과 테스트 결과는 프로젝트 Documentation 및 각 Issue / Pull Request에서 확인합니다.
+
+* [Ansible 자동화·테스트 설계](https://github.com/seokpan/seokpan-docs/blob/main/06_SeokPan_Ansible_%EC%9E%90%EB%8F%99%ED%99%94_%ED%85%8C%EC%8A%A4%ED%8A%B8_%EC%84%A4%EA%B3%84.pdf)
+* [Troubleshooting](https://github.com/seokpan/seokpan-docs/tree/main/troubleshooting)
+
+---
+
+## 10. Runtime과 Automation의 구분
+
+현재 프로젝트에서는 **실제 Runtime Infrastructure 구성과 Ansible Automation을 병행하여 개발**하고 있습니다.
+
+따라서 다음 두 가지 상태를 구분합니다.
+
+```text
+Runtime Status
+    │
+    └── 실제 Infrastructure가 구성되어 있는가?
+
+Automation Status
+    │
+    └── Ansible을 통해 재현 가능한가?
+```
+
+특정 Infrastructure가 실제 환경에 구성되어 있다고 해서 해당 환경 전체가 Ansible만으로 재현 가능하다는 의미는 아닙니다.
+
+반대로 특정 Role이나 Playbook이 존재한다고 해서 해당 기능의 자동화가 검증 완료되었다는 의미도 아닙니다.
+
+현재 자동화 상태는 실제 코드와 Issue / Pull Request의 검증 결과를 기준으로 판단합니다.
+
+---
+
+## 11. Security
+
+Infrastructure Repository에는 민감정보를 평문으로 저장하지 않습니다.
+
+주요 대상:
 
 * Password
 * Token
 * Private Key
+* Database Credential
 * kubeconfig Credential
-* TLS Private Key
-* 기타 인증 정보
+* Kubernetes Secret 값
 
-민감한 변수는 Ansible Vault를 사용하여 관리합니다.
+Ansible에서 사용하는 민감정보는 Ansible Vault 등의 방식을 사용하여 관리합니다.
 
-```text
-inventory/
-└── group_vars/
-    └── all/
-        ├── vars.yml
-        └── vault.yml
-```
-
-Vault 파일 및 민감정보가 포함된 파일은 Git에 평문으로 Commit하지 않는 것을 원칙으로 합니다.
+* [Ansible Inventory](https://github.com/seokpan/seokpan-infra/tree/main/ansible/inventory)
+* [Ansible Vault 관련 구현](https://github.com/seokpan/seokpan-infra/search?q=vault&type=code)
 
 ---
 
-# 9. Collaboration Workflow
+## 12. Documentation
 
-팀 작업은 다음 GitHub Workflow를 기본으로 합니다.
+프로젝트 전체의 상세 설계와 구현 기준은 `seokpan-docs`에서 관리합니다.
+
+README에서는 Infrastructure의 전체 흐름만 설명하고, 세부 설계·구현·검증 내용은 해당 Documentation으로 연결합니다.
+
+### 주요 참고 문서
+
+#### Architecture
+
+* [논리 Architecture](https://github.com/seokpan/seokpan-docs/blob/main/04_SeokPan_%EA%B8%B0%EC%88%A0_%EB%B9%84%EA%B5%90_%EB%B0%8F_%EB%85%BC%EB%A6%AC_%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98.pdf)
+* [물리 Architecture](https://github.com/seokpan/seokpan-docs/blob/main/05_SeokPan_%EB%AC%BC%EB%A6%AC_%EC%95%84%ED%82%A4%ED%83%9D%EC%B2%98.pdf)
+* [Architecture 디렉터리](https://github.com/seokpan/seokpan-docs/tree/main/logical-architecture)
+
+#### Implementation
+
+* [MVP Implementation Baseline](https://github.com/seokpan/seokpan-docs/blob/main/MVP_IMPLEMENTATION_BASELINE.md)
+* [Project Changes](https://github.com/seokpan/seokpan-docs/blob/main/PROJECT_CHANGES.md)
+
+#### Ansible
+
+* [Ansible 자동화·테스트 설계](https://github.com/seokpan/seokpan-docs/blob/main/06_SeokPan_Ansible_%EC%9E%90%EB%8F%99%ED%99%94_%ED%85%8C%EC%8A%A4%ED%8A%B8_%EC%84%A4%EA%B3%84.pdf)
+* [Infrastructure Inventory](https://github.com/seokpan/seokpan-infra/tree/main/ansible/inventory)
+* [Infrastructure Playbooks](https://github.com/seokpan/seokpan-infra/tree/main/ansible/playbooks)
+* [Infrastructure Roles](https://github.com/seokpan/seokpan-infra/tree/main/ansible/roles)
+
+#### Troubleshooting
+
+* [Troubleshooting 문서](https://github.com/seokpan/seokpan-docs/tree/main/troubleshooting)
+
+---
+
+## 13. Related Repositories
+
+프로젝트 관련 Repository는 다음과 같습니다.
+
+### Infrastructure
+
+[seokpan-infra](https://github.com/seokpan/seokpan-infra/tree/main)
+
+Host, VM, Network, Infrastructure 및 Ansible Automation을 관리합니다.
+
+### GitOps
+
+[seokpan-gitops](https://github.com/seokpan/seokpan-gitops)
+
+Kubernetes에서 관리되는 Application 및 Platform의 Desired State와 Argo CD 구성을 관리합니다.
+
+### Application
+
+[seokpan-app](https://github.com/seokpan/seokpan-app)
+
+Frontend / Backend Application Source와 Application Test를 관리합니다.
+
+### Documentation
+
+[seokpan-docs](https://github.com/seokpan/seokpan-docs)
+
+프로젝트 기획, Architecture, Implementation Baseline, 변경 이력 및 Troubleshooting 등 프로젝트 전반의 공용 문서를 관리합니다.
+
+---
+
+## 14. Collaboration Workflow
+
+Infrastructure 변경은 다음 Workflow를 기본으로 합니다.
 
 ```text
 Issue
-  ↓
+  │
+  ▼
 Branch
-  ↓
+  │
+  ▼
+Implementation
+  │
+  ▼
 Commit
-  ↓
+  │
+  ▼
 Pull Request
-  ↓
-Code Review
-  ↓
+  │
+  ▼
+Review
+  │
+  ▼
+Validation
+  │
+  ▼
 Squash Merge
-  ↓
+  │
+  ▼
 main
 ```
 
-## Branch Naming
-
-```text
-feature/<component>-<description>
-fix/<component>-<description>
-docs/<description>
-refactor/<component>-<description>
-```
-
-예:
-
-```text
-feature/k8s-calico
-feature/harbor-tls
-fix/maxscale-replication
-docs/readme-update
-```
-
-## Commit
-
-하나의 Commit에는 가능한 한 하나의 작업 목적만 포함합니다.
-
-예:
-
-```text
-feat: add kubernetes worker role
-fix: correct haproxy backend port
-docs: update infrastructure architecture
-refactor: split common host variables
-```
+변경사항에 대한 상세 내용과 검증 결과는 해당 Issue / Pull Request에서 확인할 수 있습니다.
 
 ---
 
-# 10. Repository 운영 원칙
+## 15. Project Status
 
-본 Repository는 단순한 Ansible Script 저장소가 아니라 **Infrastructure as Code Repository**를 지향합니다.
+현재 프로젝트는 **실제 Infrastructure Runtime 구성과 Ansible 자동화를 병행하여 구축하는 단계**입니다.
 
-따라서 다음 원칙을 유지합니다.
+따라서 기능별 현재 상태는 다음 두 가지를 기준으로 판단합니다.
 
-### 1. 반복 가능한 구성
+* 실제 Runtime 구성 여부
+* Ansible 자동화 및 검증 여부
 
-수동으로 변경한 환경을 그대로 두지 않고 가능한 경우 Ansible 코드로 반영합니다.
+전체 프로젝트의 현재 구현 기준은 다음 문서를 참고합니다.
 
-### 2. 역할별 분리
-
-하나의 거대한 Playbook보다 기능별 Role을 사용하여 재사용성과 유지보수성을 확보합니다.
-
-### 3. 환경과 로직 분리
-
-```text
-Inventory
-   │
-   ├── hosts.yml
-   ├── group_vars
-   └── host_vars
-          │
-          ▼
-      Playbook
-          │
-          ▼
-         Role
-```
-
-### 4. 검증 가능한 자동화
-
-자동화가 성공적으로 실행되었더라도 실제 서비스 상태를 별도로 검증합니다.
-
-```text
-Automation
-    ↓
-Configuration
-    ↓
-Validation
-    ↓
-Service Test
-```
-
-### 5. Infrastructure와 Automation 상태 분리
-
-```text
-Infrastructure Status
-    ≠
-Automation Status
-```
-
-실제 VM에 수동으로 구축된 환경과 Ansible을 이용해 처음부터 재구축할 수 있는 환경은 동일한 개념으로 취급하지 않습니다.
+* [MVP Implementation Baseline](https://github.com/seokpan/seokpan-docs/blob/main/MVP_IMPLEMENTATION_BASELINE.md)
+* [Project Changes](https://github.com/seokpan/seokpan-docs/blob/main/PROJECT_CHANGES.md)
 
 ---
 
-# 11. Future Improvements
+## Reference
 
-향후 다음 영역을 추가하여 Repository의 자동화 수준을 높이는 것을 목표로 합니다.
-
-* [ ] 전체 Infrastructure Bootstrap 자동화
-* [ ] VRouter Network / Firewall 자동화 완성
-* [ ] MariaDB / MaxScale 자동화
-* [ ] NFS 자동화
-* [ ] Jenkins 자동화
-* [ ] Monitoring Stack 자동화
-* [ ] 전체 Infrastructure Validation 자동화
-* [ ] Disaster Recovery / Backup 자동화
-* [ ] Playbook Idempotency 검증
-* [ ] CI 기반 Ansible Syntax Check
-* [ ] CI 기반 Ansible Lint
-* [ ] Infrastructure 재현성 테스트
-
----
-
-# 12. Project Goal
-
-최종적으로 다음과 같은 형태의 **재현 가능한 On-Premise Infrastructure Automation Platform**을 구축하는 것을 목표로 합니다.
+프로젝트 전체 흐름을 처음 확인하는 경우 다음 순서로 확인하는 것을 권장합니다.
 
 ```text
-                 GitHub Repository
-                         │
-                         ▼
-                  Ansible Playbook
-                         │
-                         ▼
-                ┌─────────────────┐
-                │ Infrastructure  │
-                │   Automation    │
-                └────────┬────────┘
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-       Network       Kubernetes      Data
-       Platform       Platform      Platform
-          │              │              │
-          ▼              ▼              ▼
-      VRouter        K8s Cluster     MariaDB
-      HAProxy        Calico          MaxScale
-      Common VIP     Add-ons         NFS
-                         │
-                         ▼
-                  Application Platform
-                         │
-                  ┌──────┴──────┐
-                  ▼             ▼
-                Harbor        ArgoCD
+① seokpan-infra README
+        │
+        ▼
+② seokpan-docs
+   Architecture / Implementation Baseline
+        │
+        ▼
+③ seokpan-infra
+   Inventory / Playbook / Role
+        │
+        ▼
+④ seokpan-gitops
+   Kubernetes Desired State
+        │
+        ▼
+⑤ seokpan-app
+   Application Source
 ```
 
-**목표는 단순히 "서버를 구성하는 것"이 아니라,
-코드로 인프라를 구성하고 검증하며 필요할 경우 동일한 환경을 다시 구축할 수 있는 상태를 만드는 것입니다.**
+### Quick Links
 
+* [Infrastructure Repository](https://github.com/seokpan/seokpan-infra/tree/main)
+* [Infrastructure Inventory](https://github.com/seokpan/seokpan-infra/tree/main/ansible/inventory)
+* [Infrastructure Playbooks](https://github.com/seokpan/seokpan-infra/tree/main/ansible/playbooks)
+* [Infrastructure Roles](https://github.com/seokpan/seokpan-infra/tree/main/ansible/roles)
+* [Project Documentation](https://github.com/seokpan/seokpan-docs)
+* [Logical Architecture](https://github.com/seokpan/seokpan-docs/tree/main/logical-architecture)
+* [Physical Architecture](https://github.com/seokpan/seokpan-docs/tree/main/physical-architecture)
+* [MVP Implementation Baseline](https://github.com/seokpan/seokpan-docs/blob/main/MVP_IMPLEMENTATION_BASELINE.md)
+* [Project Changes](https://github.com/seokpan/seokpan-docs/blob/main/PROJECT_CHANGES.md)
+* [GitOps Repository](https://github.com/seokpan/seokpan-gitops)
+* [Application Repository](https://github.com/seokpan/seokpan-app)
