@@ -170,6 +170,7 @@ rm -rf /var/lib/mysql-restore-chain-working
 | `backup_restore_preserve_corrupted_datadir` | `true` | 기존 datadir 보존 여부(이슈 #119 결정 기록, 2026-09-04 전환 완료) |
 | `mariadb_monitor_name` | `MariaDB-Monitor` | `maxctrl call command mariadbmon failover` 대상 모니터명 |
 | `dr_failsafe_read_only_cnf_path` | `/etc/my.cnf.d/zz-dr-failsafe-read-only.cnf` | Split-brain 방지 임시 안전장치 파일 경로 |
+| `backup_restore_fenced_hosts` | `[]` | Split-brain 안전장치 배치가 도달 불가(unreachable)로 실패한 호스트 중, 사람이 실제로 접속·확인해 fencing(서비스 정지) 처리를 완료했다고 명시적으로 확인한 호스트 목록. `[6]` 실행 시 extra-vars로 지정. 미확인 상태로는 Gate를 통과할 수 없음 |
 
 ## 변경 이력 요약
 
@@ -283,6 +284,29 @@ End-to-End 통과 확인. 다만 이 환경에서는 복제 미설정 상태의 
 
 대상 호스트가 도달 불가(하드웨어 장애 등 진짜 유실) 상태라 배치 자체가 실패해도
 문제없습니다 — 나중에 그 서버를 이 playbook으로 되살릴 때 자연히 정상 상태가 됩니다.
+
+다만 "도달 불가"만으로는 자동으로 다음 단계를 진행하지 않습니다. 도달 불가는 물리적
+유실을 보장하지 않으며, 일시적 SSH/네트워크 장애일 수 있고 그 경우 MariaDB
+프로세스는 실제로 살아있거나 곧 재기동될 수 있어 Split-brain 위험이 그대로
+남습니다. 배치가 도달 불가로 실패하면 [6]은 즉시 실패 처리되며, 다음 중 하나를
+사람이 실제로 확인한 뒤에만 재실행할 수 있습니다:
+
+- (a) 해당 호스트에 콘솔/IPMI 등으로 직접 접속해 mariadb 서비스가 정지되어 있고
+  재기동되지 않음을 확인, 또는
+- (b) 해당 호스트의 mariadb 서비스를 사람이 직접 중지(fencing)
+
+확인 후 재실행 시 `backup_restore_fenced_hosts`에 확인한 호스트 목록을 지정합니다:
+
+```bash
+ansible-playbook playbooks/mariadb_dr_recovery.yml -l <복구할_호스트> --ask-vault-pass \
+  --tags maxscale_verify \
+  -e backup_restore_role=master \
+  -e backup_restore_fenced_hosts='["mariadb-01"]'
+```
+
+> ⚠️ 실제로 재기동 가능한 상태였다면 이 값을 지정하지 마세요 — "사람이 실제로
+> 확인했다"는 것을 코드에 알리는 명시적 확인 절차이며, 자동 판정을 우회하는
+> 용도가 아닙니다.
 
 > ⚠️ 이 안전장치 코드는 `--syntax-check` 통과까지 확인했으며, 실제 재현 검증(세
 > 번째 서버 다운/재기동 테스트)은 다음 DR 훈련으로 이월되었습니다.
