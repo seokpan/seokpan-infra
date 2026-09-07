@@ -21,11 +21,11 @@ backup_transfer_retention_days: 7
 
 # 이슈 #114: Full/Incremental 각각의 cron 스케줄로 분리
 # (기존 단일 backup_transfer_cron_hour/minute 는 제거 — schedule.yml에서 두 cron으로 대체)
-backup_transfer_full_cron_weekday: "0"     # 0 = 일요일 (cron weekday 표기)
-backup_transfer_full_cron_hour: "2"
+backup_transfer_full_cron_weekday: "3"     # 3 = 수요일 (cron weekday 표기)
+backup_transfer_full_cron_hour: "14"
 backup_transfer_full_cron_minute: "0"
 
-backup_transfer_incr_cron_weekday: "1-6"   # 월~토 (일요일 제외)
+backup_transfer_incr_cron_weekday: "1,2,4,5"   # 월, 화, 목, 금
 backup_transfer_incr_cron_hour: "2"
 backup_transfer_incr_cron_minute: "0"
 
