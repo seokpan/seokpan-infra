@@ -111,11 +111,18 @@ backup_restore_master_host: ""
 backup_restore_master_port: 3306
 
 # [7] service_checklist.yml — Common VIP 경유 R/W 헬스체크(임시 테이블 방식)
-# E_infra_snapshot.md 1절 기준 Common VIP. 이슈 #102(VIP 리스너 TLS 미설정)가 아직
-# open이라 MariaDB 클라이언트 --skip-ssl 워크어라운드를 함께 사용해야 함.
+# E_infra_snapshot.md 1절 기준 Common VIP. 이슈 #102는 PR #137로 closed —
+# MaxScale Read-Write-Listener는 TLS 전용이므로 --skip-ssl 워크어라운드(TS-018
+# 이전 상태)는 더 이상 유효하지 않다. ca_trust role이 배포한 시스템 신뢰 CA로
+# --ssl-ca 검증까지 통과시킨다(TS-018 검증 방식과 동일).
 common_vip_host: 10.1.93.90
 common_vip_port: 3306
 dr_healthcheck_credentials_file: /root/.dr_healthcheck_svc.cnf
+
+# ca_trust role이 배포하는 시스템 신뢰 CA 경로와 동일 값을 유지 (ca_trust role
+# 자체를 의존성으로 걸지 않기 위해, internal_ca/ca_trust 두 role이 서로 값을
+# 중복 정의해온 기존 관례와 동일하게 이 role에서도 하드코딩 유지)
+dr_healthcheck_ssl_ca_path: /etc/pki/ca-trust/source/anchors/seokpan-internal-ca.crt
 
 # PR #133 리뷰 반영(2026-09-04): Split-brain 방지 임시 안전장치 파일 경로.
 # role=master로 새 Master가 확립되면 같은 mariadbs 그룹의 나머지 호스트에 이 파일을

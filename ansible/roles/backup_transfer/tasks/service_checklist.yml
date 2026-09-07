@@ -69,10 +69,13 @@
   no_log: true
 
 - name: VIP 경유 CREATE TEMPORARY TABLE → INSERT → SELECT 1회 커넥션 내 실행
-  # --skip-ssl: 이슈 #102(VIP 리스너 TLS 미설정, open) 워크어라운드 — E_infra_snapshot.md 5절 참고
+  # TLS(이슈 #102 closed, PR #137/#135): MaxScale Read-Write-Listener가 TLS 전용으로
+  # 전환되어 --skip-ssl 워크어라운드는 더 이상 유효하지 않음(사용 시 서버가 거부).
+  # ca_trust role이 배포한 시스템 신뢰 CA를 --ssl-ca로 명시 지정해 hostname/CA
+  # 검증까지 통과(TS-018 검증 방식과 동일 — SAN에 VIP IP 포함되어 있음)
   # 임시 테이블은 이 커넥션 종료와 동시에 자동 삭제되므로 별도 DROP/정리 불필요
   ansible.builtin.command: >
-    mariadb --defaults-extra-file={{ dr_healthcheck_credentials_file }} --skip-ssl
+    mariadb --defaults-extra-file={{ dr_healthcheck_credentials_file }}
     -e "CREATE TEMPORARY TABLE dr_healthcheck_tmp (id INT, checked_at DATETIME);
     INSERT INTO dr_healthcheck_tmp VALUES (1, NOW());
     SELECT * FROM dr_healthcheck_tmp;"
