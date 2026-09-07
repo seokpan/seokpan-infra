@@ -47,6 +47,13 @@
 
 # ============================================================
 # 3. 이미 배포된 인증서가 있는지 확인 (멱등성)
+#
+# 재발급 판정 기준 (Issue #138):
+#   - 인증서가 없음
+#   - 인증서 정보를 읽을 수 없음
+#   - 30일 이내 만료 예정
+#   - 실제 SAN과 tls_service_san이 다름 (순서/공백/대소문자/
+#     "IP Address:" vs "IP:" 표기 차이는 무시하고 비교)
 # ============================================================
 
 - name: Check existing certificate on target host
@@ -54,18 +61,79 @@
     path: "{{ tls_service_cert_path }}"
   register: tls_existing_cert
 
-- name: Check existing certificate SAN matches (skip reissue if valid)
+- name: Check existing certificate expiry
   ansible.builtin.command:
     cmd: openssl x509 -in {{ tls_service_cert_path }} -noout -checkend 2592000
   register: tls_existing_cert_valid
   changed_when: false
   failed_when: false
+  check_mode: false
   when: tls_existing_cert.stat.exists
 
-# checkend 2592000 = 30일 이내 만료 예정이면 rc != 0 -> 재발급 대상
+- name: Read existing certificate SAN (raw)
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail;
+      openssl x509 -in {{ tls_service_cert_path }} -noout -ext subjectAltName 2>/dev/null
+      | tail -n +2
+  register: tls_existing_san_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: tls_existing_cert.stat.exists
+
+# SAN 두 집합을 같은 형식으로 정규화 후 비교.
+# - "IP Address:" -> "IP:" 통일 (openssl 출력 vs 설정값 표기 차이 흡수)
+# - 공백 전부 제거 (순서/공백 차이 무시)
+# - 소문자 변환 (DNS 값 대소문자 차이 무시)
+# - 콤마로 split 후 정렬된 리스트로 비교 (순서 무시, set 비교와 동일 효과)
+- name: Normalize SAN sets for comparison
+  ansible.builtin.set_fact:
+    tls_existing_san_set: >-
+      {{
+        (tls_existing_san_raw.stdout | default(''))
+        | replace('IP Address:', 'IP:')
+        | replace(' ', '')
+        | lower
+        | split(',')
+        | reject('equalto', '')
+        | sort
+        | list
+      }}
+    tls_desired_san_set: >-
+      {{
+        tls_service_san
+        | replace('IP Address:', 'IP:')
+        | replace(' ', '')
+        | lower
+        | split(',')
+        | reject('equalto', '')
+        | sort
+        | list
+      }}
+
+- name: Determine SAN mismatch
+  ansible.builtin.set_fact:
+    tls_san_mismatch: "{{ tls_existing_san_set != tls_desired_san_set }}"
+
 - name: Set reissue-needed fact
   ansible.builtin.set_fact:
-    tls_needs_issue: "{{ not tls_existing_cert.stat.exists or (tls_existing_cert_valid.rc | default(1)) != 0 }}"
+    tls_needs_issue: >-
+      {{
+        (not tls_existing_cert.stat.exists)
+        or ((tls_existing_cert_valid.rc | default(1)) != 0)
+        or tls_san_mismatch
+      }}
+
+- name: Display reissue decision (for audit/troubleshooting)
+  ansible.builtin.debug:
+    msg:
+      - "인증서 존재 = {{ tls_existing_cert.stat.exists }}"
+      - "만료 임박(30일 이내) 또는 읽기 실패 = {{ (tls_existing_cert_valid.rc | default(1)) != 0 }}"
+      - "SAN 불일치 = {{ tls_san_mismatch }}"
+      - "  - 기존 SAN = {{ tls_existing_san_set }}"
+      - "  - 원하는 SAN = {{ tls_desired_san_set }}"
+      - "재발급 필요 = {{ tls_needs_issue }}"
 
 
 # ============================================================
@@ -155,6 +223,7 @@
   delegate_to: "{{ groups['ansible_controller'][0] }}"
   register: tls_key_content
   when: tls_needs_issue
+  no_log: true
 
 - name: Deploy certificate to target host
   ansible.builtin.copy:
