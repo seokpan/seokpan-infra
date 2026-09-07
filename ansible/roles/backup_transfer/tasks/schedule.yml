@@ -3,7 +3,8 @@
 # Scope: Data, Storage & Recovery
 # Project: 石나가는 판단
 # Purpose: Full+Incremental 체이닝 cron 스케줄 등록 (이슈 #114)
-#          - 일요일: Full, 그 외 요일: Incremental (동일 스크립트를 --mode 인자로 구분)
+#          - 수요일: Full, 월, 화, 목, 금: Incremental (동일 스크립트를 --mode 인자로 구분)
+#          - 주말은 서버 활성화가 불가능하므로 주말은 제외
 
 - name: MariaDB Full 백업 cron 등록 (수요일)
   ansible.builtin.cron:
