@@ -1,0 +1,243 @@
+---
+# Detect the currently running kubeadm etcd container.
+
+- name: Find running etcd container
+  ansible.builtin.command:
+    cmd: /usr/local/bin/crictl ps --name etcd -q
+  register: etcd_tools_container_ids
+  changed_when: false
+
+- name: Assert exactly one running etcd container exists
+  ansible.builtin.assert:
+    that:
+      - etcd_tools_container_ids.stdout_lines | length == 1
+    fail_msg: >-
+      Expected exactly one running etcd container on {{ inventory_hostname }},
+      found {{ etcd_tools_container_ids.stdout_lines | length }}:
+      {{ etcd_tools_container_ids.stdout_lines }}
+
+- name: Set running etcd container ID
+  ansible.builtin.set_fact:
+    etcd_tools_container_id: "{{ etcd_tools_container_ids.stdout_lines[0] }}"
+
+- name: Inspect running etcd container
+  ansible.builtin.command:
+    cmd: "/usr/local/bin/crictl inspect {{ etcd_tools_container_id }}"
+  register: etcd_tools_inspect_raw
+  changed_when: false
+
+- name: Parse running etcd container metadata
+  ansible.builtin.set_fact:
+    etcd_tools_inspect: "{{ etcd_tools_inspect_raw.stdout | from_json }}"
+
+- name: Set etcd Runtime metadata
+  ansible.builtin.set_fact:
+    etcd_tools_runtime_image: "{{ etcd_tools_inspect.status.image.image }}"
+    etcd_tools_runtime_image_ref: "{{ etcd_tools_inspect.status.imageRef }}"
+    etcd_tools_runtime_pid: "{{ etcd_tools_inspect.info.pid | string }}"
+
+- name: Assert etcd Runtime image baseline
+  ansible.builtin.assert:
+    that:
+      - etcd_tools_runtime_image == etcd_tools_expected_image
+      - etcd_tools_runtime_image_ref == etcd_tools_expected_image_ref
+      - etcd_tools_runtime_pid | length > 0
+    fail_msg: >-
+      etcd Runtime baseline mismatch on {{ inventory_hostname }}.
+      image={{ etcd_tools_runtime_image }},
+      imageRef={{ etcd_tools_runtime_image_ref }},
+      pid={{ etcd_tools_runtime_pid }}
+
+# Read versions directly from the running container without requiring a shell.
+
+- name: Read Runtime etcd version
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/crictl
+      - exec
+      - "{{ etcd_tools_container_id }}"
+      - /usr/local/bin/etcd
+      - --version
+  register: etcd_tools_etcd_version_raw
+  changed_when: false
+
+- name: Read Runtime etcdctl version
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/crictl
+      - exec
+      - "{{ etcd_tools_container_id }}"
+      - /usr/local/bin/etcdctl
+      - version
+  register: etcd_tools_etcdctl_version_raw
+  changed_when: false
+
+- name: Read Runtime etcdutl version
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/crictl
+      - exec
+      - "{{ etcd_tools_container_id }}"
+      - /usr/local/bin/etcdutl
+      - version
+  register: etcd_tools_etcdutl_version_raw
+  changed_when: false
+
+- name: Parse etcd Runtime version
+  ansible.builtin.set_fact:
+    etcd_tools_runtime_version: >-
+      {{
+        etcd_tools_etcd_version_raw.stdout
+        | regex_search('etcd Version: ([0-9.]+)', '\1')
+        | first
+      }}
+
+- name: Assert etcd tool versions match Runtime baseline
+  ansible.builtin.assert:
+    that:
+      - etcd_tools_runtime_version == etcd_tools_expected_version
+      - "'etcdctl version: ' ~ etcd_tools_expected_version in etcd_tools_etcdctl_version_raw.stdout"
+      - "'etcdutl version: ' ~ etcd_tools_expected_version in etcd_tools_etcdutl_version_raw.stdout"
+    fail_msg: >-
+      etcd tool version mismatch on {{ inventory_hostname }}.
+      etcd={{ etcd_tools_etcd_version_raw.stdout | trim }},
+      etcdctl={{ etcd_tools_etcdctl_version_raw.stdout | trim }},
+      etcdutl={{ etcd_tools_etcdutl_version_raw.stdout | trim }}
+
+- name: Set etcd Runtime source and destination paths
+  ansible.builtin.set_fact:
+    etcd_tools_runtime_source_dir: >-
+      /proc/{{ etcd_tools_runtime_pid }}/root{{ etcd_tools_source_dir }}
+    etcd_tools_version_dir: >-
+      {{ etcd_tools_base_dir }}/{{ etcd_tools_runtime_version }}
+
+# Validate source binaries through the running container rootfs.
+#
+# Do not use ansible.builtin.stat checksum on /proc/<PID>/root paths.
+# stat may resolve the proc-root symlink to the host root and incorrectly
+# inspect /usr/local/bin instead of the container mount namespace.
+
+- name: Validate etcd Runtime source binaries and collect SHA-256
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      source_path="{{ etcd_tools_runtime_source_dir }}/{{ item }}"
+
+      test -f "$source_path"
+      test -x "$source_path"
+
+      sha256sum "$source_path" | awk '{print $1}'
+    executable: /bin/bash
+  loop: "{{ etcd_tools_binaries }}"
+  register: etcd_tools_source_hashes
+  changed_when: false
+
+# Install versioned project-owned copies.
+
+- name: Ensure etcd tools base directory exists
+  ansible.builtin.file:
+    path: "{{ etcd_tools_base_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure etcd version directory exists
+  ansible.builtin.file:
+    path: "{{ etcd_tools_version_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install etcd Runtime binaries when content differs
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+
+      source_path="{{ etcd_tools_runtime_source_dir }}/{{ item }}"
+      destination_path="{{ etcd_tools_version_dir }}/{{ item }}"
+
+      source_sha="$(sha256sum "$source_path" | awk '{print $1}')"
+
+      if [ -f "$destination_path" ]; then
+        destination_sha="$(sha256sum "$destination_path" | awk '{print $1}')"
+      else
+        destination_sha=""
+      fi
+
+      if [ "$source_sha" != "$destination_sha" ]; then
+        install \
+          -o root \
+          -g root \
+          -m 0755 \
+          "$source_path" \
+          "$destination_path"
+        echo "CHANGED"
+      else
+        echo "OK"
+      fi
+    executable: /bin/bash
+  loop: "{{ etcd_tools_binaries }}"
+  register: etcd_tools_install_result
+  changed_when: "'CHANGED' in etcd_tools_install_result.stdout"
+
+- name: Verify Runtime and installed binary SHA-256 values
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+
+      source_path="{{ etcd_tools_runtime_source_dir }}/{{ item }}"
+      destination_path="{{ etcd_tools_version_dir }}/{{ item }}"
+
+      source_sha="$(sha256sum "$source_path" | awk '{print $1}')"
+      destination_sha="$(sha256sum "$destination_path" | awk '{print $1}')"
+
+      echo "binary={{ item }}"
+      echo "source_sha256=$source_sha"
+      echo "destination_sha256=$destination_sha"
+
+      test "$source_sha" = "$destination_sha"
+    executable: /bin/bash
+  loop: "{{ etcd_tools_binaries }}"
+  register: etcd_tools_sha256_verification
+  changed_when: false
+
+- name: Point current etcd tooling link to Runtime version
+  ansible.builtin.file:
+    src: "{{ etcd_tools_runtime_version }}"
+    dest: "{{ etcd_tools_current_link }}"
+    state: link
+    force: true
+    owner: root
+    group: root
+
+# Final host-side execution validation.
+
+- name: Verify installed etcd version
+  ansible.builtin.command:
+    cmd: "{{ etcd_tools_version_dir }}/etcd --version"
+  register: etcd_tools_installed_etcd_version
+  changed_when: false
+
+- name: Verify installed etcdctl version
+  ansible.builtin.command:
+    cmd: "{{ etcd_tools_version_dir }}/etcdctl version"
+  register: etcd_tools_installed_etcdctl_version
+  changed_when: false
+
+- name: Verify installed etcdutl version
+  ansible.builtin.command:
+    cmd: "{{ etcd_tools_version_dir }}/etcdutl version"
+  register: etcd_tools_installed_etcdutl_version
+  changed_when: false
+
+- name: Assert installed etcd tooling version contract
+  ansible.builtin.assert:
+    that:
+      - "'etcd Version: ' ~ etcd_tools_runtime_version in etcd_tools_installed_etcd_version.stdout"
+      - "'etcdctl version: ' ~ etcd_tools_runtime_version in etcd_tools_installed_etcdctl_version.stdout"
+      - "'etcdutl version: ' ~ etcd_tools_runtime_version in etcd_tools_installed_etcdutl_version.stdout"
+    fail_msg: >-
+      Installed etcd tooling version verification failed
+      on {{ inventory_hostname }}.

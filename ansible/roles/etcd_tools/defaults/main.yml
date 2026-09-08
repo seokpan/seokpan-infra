@@ -1,0 +1,18 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Runtime Platform
+# Project: 石나가는 판단
+# Purpose: etcd DR tooling extracted from the running kubeadm etcd image
+
+etcd_tools_expected_image: "registry.k8s.io/etcd:3.6.8-0"
+etcd_tools_expected_image_ref: "registry.k8s.io/etcd@sha256:397189418d1a00e500c0605ad18d1baf3b541a1004d768448c367e48071622e5"
+etcd_tools_expected_version: "3.6.8"
+
+etcd_tools_source_dir: "/usr/local/bin"
+etcd_tools_base_dir: "/opt/seokpan/etcd-tools"
+etcd_tools_current_link: "{{ etcd_tools_base_dir }}/current"
+
+etcd_tools_binaries:
+  - etcd
+  - etcdctl
+  - etcdutl
