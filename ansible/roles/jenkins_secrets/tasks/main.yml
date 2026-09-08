@@ -100,6 +100,65 @@
   become: false
   no_log: true
 
+# 작성자: 최유준
+# 작성 날짜: 2026-09-08
+#
+# harbor-pull-secret: kubelet이 Harbor 프라이빗 이미지를 Pull할 때 쓰는
+# imagePullSecrets 전용 Secret. 기존 harbor-robot-dockerconfig(Opaque,
+# buildctl 볼륨 마운트 전용, Issue #126)와는 목적이 달라 별도 관리함.
+# username/password 조합 방식은 위 harbor-robot-dockerconfig Task와 동일
+# (robot$<project>+<robot_name> 형식 필수 - 과거 이 형식을 빠뜨려 BuildKit→Harbor
+# 인증이 실패했던 이력 있음, 위 주석 참고).
+- name: harbor-pull-secret용 dockerconfigjson 조합
+  ansible.builtin.set_fact:
+    harbor_pull_secret_dockerconfigjson_b64: >-
+      {{
+        {
+          'auths': {
+            hostvars['harbor'].harbor_hostname: {
+              'username': 'robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name,
+              'password': vault_harbor_robot_secret,
+              'auth': (('robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name ~ ':' ~ vault_harbor_robot_secret) | b64encode)
+            }
+          }
+        } | to_json | b64encode
+      }}
+  no_log: true
+
+- name: harbor-pull-secret 생성/갱신 (kubernetes.io/dockerconfigjson)
+  # [의도적 설계] 이 Task는 check_mode: false로 --check 실행 시에도 실제로
+  # 적용됩니다. 아래 assert가 이 Task의 register 결과(harbor_pull_secret_result)를
+  # 참조하기 때문에, dry-run에서 결과가 없으면 assert가 실패합니다. 이는 팀의
+  # 기존 Ansible Check Mode 원칙(POST/PUT 이후 register 참조 Task는 check_mode:
+  # false + 하위 assert는 when: not ansible_check_mode)을 그대로 따른 것이며,
+  # harbor-robot-dockerconfig Task와 동일한 패턴입니다. 즉 --check로 이 role을
+  # 돌리면 이 Task와 harbor-robot-dockerconfig Task는 실제로 적용되고, assert만
+  # skip됩니다 - 완전한 dry-run이 아님을 실행자가 인지하고 있어야 합니다.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/dockerconfigjson
+      metadata:
+        name: harbor-pull-secret
+        namespace: cicd
+      data:
+        .dockerconfigjson: "{{ harbor_pull_secret_dockerconfigjson_b64 }}"
+  register: harbor_pull_secret_result
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: harbor-pull-secret 생성 결과 확인
+  ansible.builtin.assert:
+    that:
+      - harbor_pull_secret_result is succeeded
+    fail_msg: "harbor-pull-secret 생성/갱신 실패"
+  when: not ansible_check_mode
+
 - name: 생성된 Secret 목록 확인 (요약)
   kubernetes.core.k8s_info:
     kubeconfig: "{{ cluster_kubeconfig }}"
@@ -110,6 +169,7 @@
     - jenkins-admin
     - harbor-robot-dockerconfig
     - jenkins-harbor-credential
+    - harbor-pull-secret
   register: jenkins_secrets_summary
   delegate_to: localhost
   become: false
@@ -122,3 +182,4 @@
          | map(attribute='resources')
          | map('length')
          | list }}
+
