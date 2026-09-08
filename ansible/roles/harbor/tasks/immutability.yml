@@ -1,8 +1,35 @@
 ---
+# 작성자: 최유준
+# 작성 날짜: 2026-09-08
+#
 # Harbor Project Tag Immutability
 # - 06 공식 설계의 Project Tag Immutability 요구사항 구현
 # - 동일 Tag가 다른 Image Digest로 덮어써지는 것을 방지
-# - 기존 동일 Rule이 있으면 재사용하고, disabled 상태면 활성화
+# - seokpan-app Issue #58(main Image Pipeline) 선행 조건: Candidate Tag(scan-*)는
+#   Immutability 예외로 두어 재생성/삭제가 가능해야 함. 그 외 Tag(git-* 포함)는
+#   기존 immutable 정책을 그대로 유지.
+#
+# 설계 근거(중요, 실제 API 검증으로 확정됨):
+# Harbor Immutability Rule은 여러 개가 존재하면 OR로 평가된다. 즉 "Tag ** immutable"
+# 규칙이 남아있는 상태에서 "Tag scan-* 만 예외" 같은 별도 규칙을 추가로 만들어도,
+# 기존 "Tag **" 규칙이 scan-*까지 여전히 매치시켜 immutable로 묶는다.
+#
+# 또한 Harbor Immutability Rule은 tag_selectors 안에 selector를 "정확히 1개"만
+# 허용한다(Harbor UI도 matching/excluding 중 하나만 선택 가능한 구조). matches와
+# excludes를 같은 rule에 함께 넣으면 저장(PUT 200)은 되지만 평가 시 AND로 조합되지
+# 않아 예외가 실제로 동작하지 않는다(scan-* 삭제 시도가 여전히 412로 막히는 것으로
+# 실제 확인됨). 따라서 예외는 "excludes" 단일 selector 하나만으로 표현해야 한다.
+#   tag_selectors = [ { decoration: excludes, pattern: "scan-**" } ]
+# 위 형태 하나만으로 "scan-** 패턴을 제외한 모든 Tag"를 의미하며 matches selector는
+# 불필요하다(오히려 함께 넣으면 예외가 무력화됨).
+#
+# 이 파일은 그래서 기존 규칙을 아래 두 가지 상태로 구분해서 판단한다.
+#   - 레거시 상태: selector가 1개이고 decoration=matches, pattern=harbor_immutability_tag_pattern
+#                  (예외 미적용 상태, 전체 Tag immutable)
+#   - 목표 상태  : selector가 1개이고 decoration=excludes, pattern=harbor_immutability_tag_exclude_pattern
+#                  (scan-** 제외 전체 Tag immutable)
+# 레거시 상태를 찾으면 "생성"이 아니라 "PUT으로 selector를 excludes 단일로 교체"한다.
+# 매치되는 규칙이 아예 없을 때(최초 세팅)만 excludes 단일 selector로 새 규칙을 생성한다.
 
 - name: Harbor Project ID 조회 (Immutability용)
   ansible.builtin.uri:
@@ -51,30 +78,56 @@
   check_mode: false
   no_log: true
 
-- name: 동일 범위 Immutability Rule 검색 초기화
-  ansible.builtin.set_fact:
-    _harbor_matching_immutability_rule: {}
+# ------------------------------------------------------------------
+# 규칙 상태 판정: 레거시(matches만) vs 목표(matches+excludes)
+# ------------------------------------------------------------------
 
-- name: 동일 범위 Immutability Rule 검색
+- name: 레거시/목표 Immutability Rule 검색 초기화
   ansible.builtin.set_fact:
-    _harbor_matching_immutability_rule: "{{ item }}"
+    _harbor_legacy_immutability_rule: {}
+    _harbor_target_immutability_rule: {}
+
+- name: 레거시 Immutability Rule 검색 (matches 단일 selector, 전체 Tag immutable)
+  ansible.builtin.set_fact:
+    _harbor_legacy_immutability_rule: "{{ item }}"
   loop: "{{ _harbor_immutability_rules.json | default([]) }}"
   loop_control:
     label: "{{ item.id | default('no-id') }}"
   when:
     - item.action | default('') == 'immutable'
     - item.template | default('') == 'immutable_template'
-    - >-
-      (item.tag_selectors | default([])
-       | selectattr('pattern', 'equalto', harbor_immutability_tag_pattern)
-       | list | length) > 0
+    - (item.tag_selectors | default([]) | length) == 1
+    - item.tag_selectors[0].decoration | default('') == 'matches'
+    - item.tag_selectors[0].pattern | default('') == harbor_immutability_tag_pattern
     - >-
       (item.scope_selectors.repository | default([])
        | selectattr('pattern', 'equalto', harbor_immutability_repository_pattern)
        | list | length) > 0
   no_log: true
 
-- name: Harbor Tag Immutability Rule 생성
+- name: 목표 상태 Immutability Rule 검색 (excludes 단일 selector, scan-** 제외)
+  ansible.builtin.set_fact:
+    _harbor_target_immutability_rule: "{{ item }}"
+  loop: "{{ _harbor_immutability_rules.json | default([]) }}"
+  loop_control:
+    label: "{{ item.id | default('no-id') }}"
+  when:
+    - item.action | default('') == 'immutable'
+    - item.template | default('') == 'immutable_template'
+    - (item.tag_selectors | default([]) | length) == 1
+    - item.tag_selectors[0].decoration | default('') == 'excludes'
+    - item.tag_selectors[0].pattern | default('') == harbor_immutability_tag_exclude_pattern
+    - >-
+      (item.scope_selectors.repository | default([])
+       | selectattr('pattern', 'equalto', harbor_immutability_repository_pattern)
+       | list | length) > 0
+  no_log: true
+
+# ------------------------------------------------------------------
+# Case A: 매치되는 규칙이 전혀 없음 (최초 세팅) -> matches+excludes 포함해서 신규 생성
+# ------------------------------------------------------------------
+
+- name: Harbor Tag Immutability Rule 신규 생성 (excludes 단일 selector)
   ansible.builtin.uri:
     url: >-
       https://{{ harbor_hostname }}/api/v2.0/projects/
@@ -93,8 +146,8 @@
       priority: 0
       tag_selectors:
         - kind: doublestar
-          decoration: matches
-          pattern: "{{ harbor_immutability_tag_pattern }}"
+          decoration: excludes
+          pattern: "{{ harbor_immutability_tag_exclude_pattern }}"
       scope_selectors:
         repository:
           - kind: doublestar
@@ -103,17 +156,23 @@
     status_code: 201
   when:
     - harbor_immutability_enabled | bool
-    - _harbor_matching_immutability_rule.id is not defined
+    - _harbor_legacy_immutability_rule.id is not defined
+    - _harbor_target_immutability_rule.id is not defined
   register: _harbor_immutability_create
   changed_when: true
   no_log: true
 
-- name: 기존 동일 Immutability Rule 활성화
+# ------------------------------------------------------------------
+# Case B: 레거시 규칙(matches만)이 있음 -> PUT으로 excludes 추가 갱신
+# (신규 규칙을 만들지 않고 기존 규칙의 tag_selectors만 갱신 -> 새 rule id 생성 방지)
+# ------------------------------------------------------------------
+
+- name: 레거시 Immutability Rule의 selector를 excludes 단일로 교체 (PUT 갱신)
   ansible.builtin.uri:
     url: >-
       https://{{ harbor_hostname }}/api/v2.0/projects/
       {{- _harbor_immutability_project_id }}/immutabletagrules/
-      {{- _harbor_matching_immutability_rule.id }}
+      {{- _harbor_legacy_immutability_rule.id }}
     method: PUT
     user: admin
     password: "{{ harbor_admin_password }}"
@@ -121,21 +180,63 @@
     validate_certs: false
     body_format: json
     body:
+      id: "{{ _harbor_legacy_immutability_rule.id | int }}"
       project_id: "{{ _harbor_immutability_project_id | int }}"
       disabled: false
       action: immutable
       template: immutable_template
-      priority: "{{ _harbor_matching_immutability_rule.priority | default(0) }}"
-      tag_selectors: "{{ _harbor_matching_immutability_rule.tag_selectors }}"
-      scope_selectors: "{{ _harbor_matching_immutability_rule.scope_selectors }}"
+      priority: "{{ _harbor_legacy_immutability_rule.priority | default(0) }}"
+      tag_selectors:
+        - kind: doublestar
+          decoration: excludes
+          pattern: "{{ harbor_immutability_tag_exclude_pattern }}"
+      scope_selectors: "{{ _harbor_legacy_immutability_rule.scope_selectors }}"
     status_code: 200
   when:
     - harbor_immutability_enabled | bool
-    - _harbor_matching_immutability_rule.id is defined
-    - _harbor_matching_immutability_rule.disabled | default(false) | bool
+    - _harbor_legacy_immutability_rule.id is defined
+    - _harbor_target_immutability_rule.id is not defined
+  register: _harbor_immutability_add_exclude
+  changed_when: true
+  no_log: true
+
+# ------------------------------------------------------------------
+# Case C: 목표 상태 규칙이 이미 있지만 disabled인 경우 -> 활성화만 수행
+# ------------------------------------------------------------------
+
+- name: 기존 목표 상태 Immutability Rule 활성화
+  ansible.builtin.uri:
+    url: >-
+      https://{{ harbor_hostname }}/api/v2.0/projects/
+      {{- _harbor_immutability_project_id }}/immutabletagrules/
+      {{- _harbor_target_immutability_rule.id }}
+    method: PUT
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    body:
+      id: "{{ _harbor_target_immutability_rule.id | int }}"
+      project_id: "{{ _harbor_immutability_project_id | int }}"
+      disabled: false
+      action: immutable
+      template: immutable_template
+      priority: "{{ _harbor_target_immutability_rule.priority | default(0) }}"
+      tag_selectors: "{{ _harbor_target_immutability_rule.tag_selectors }}"
+      scope_selectors: "{{ _harbor_target_immutability_rule.scope_selectors }}"
+    status_code: 200
+  when:
+    - harbor_immutability_enabled | bool
+    - _harbor_target_immutability_rule.id is defined
+    - _harbor_target_immutability_rule.disabled | default(false) | bool
   register: _harbor_immutability_enable
   changed_when: true
   no_log: true
+
+# ------------------------------------------------------------------
+# 최종 검증: matches + excludes가 모두 존재하고 활성 상태인지 재조회로 확인
+# ------------------------------------------------------------------
 
 - name: Immutability Rule 최종 상태 재조회
   ansible.builtin.uri:
@@ -150,21 +251,21 @@
     status_code: 200
   register: _harbor_immutability_rules_after
   no_log: true
-  when: 
+  when:
     - harbor_immutability_enabled | bool
     - not ansible_check_mode
   check_mode: false
 
-- name: 활성 Immutability Rule 검증 초기화
+- name: 목표 상태 Immutability Rule 검증 초기화
   ansible.builtin.set_fact:
-    _harbor_immutability_active_verified: false
-  when: 
+    _harbor_immutability_target_verified: false
+  when:
     - harbor_immutability_enabled | bool
     - not ansible_check_mode
 
-- name: 활성 Immutability Rule 검증
+- name: 목표 상태 Immutability Rule 검증 (excludes 단일 selector + 활성 상태)
   ansible.builtin.set_fact:
-    _harbor_immutability_active_verified: true
+    _harbor_immutability_target_verified: true
   loop: "{{ _harbor_immutability_rules_after.json | default([]) }}"
   loop_control:
     label: "{{ item.id | default('no-id') }}"
@@ -173,25 +274,26 @@
     - not ansible_check_mode
     - not (item.disabled | default(false) | bool)
     - item.action | default('') == 'immutable'
-    - >-
-      (item.tag_selectors | default([])
-       | selectattr('pattern', 'equalto', harbor_immutability_tag_pattern)
-       | list | length) > 0
+    - (item.tag_selectors | default([]) | length) == 1
+    - item.tag_selectors[0].decoration | default('') == 'excludes'
+    - item.tag_selectors[0].pattern | default('') == harbor_immutability_tag_exclude_pattern
     - >-
       (item.scope_selectors.repository | default([])
        | selectattr('pattern', 'equalto', harbor_immutability_repository_pattern)
        | list | length) > 0
   no_log: true
 
-- name: Harbor Tag Immutability 활성 상태 확인
+- name: Harbor Tag Immutability(scan-* 예외 포함) 활성 상태 확인
   ansible.builtin.assert:
     that:
-      - _harbor_immutability_active_verified | bool
+      - _harbor_immutability_target_verified | bool
     fail_msg: >-
       Harbor Project '{{ harbor_project_name }}'의 Tag Immutability Rule이
-      활성 상태로 확인되지 않았습니다.
+      excludes='{{ harbor_immutability_tag_exclude_pattern }}' 단일 selector로
+      활성 상태인지 확인되지 않았습니다.
     success_msg: >-
-      Harbor Project '{{ harbor_project_name }}' Tag Immutability Rule 활성 상태 확인 완료.
-  when: 
+      Harbor Project '{{ harbor_project_name }}' Tag Immutability Rule이
+      scan-* 예외를 포함한 목표 상태(excludes 단일 selector)로 활성화됨을 확인했습니다.
+  when:
     - harbor_immutability_enabled | bool
     - not ansible_check_mode
