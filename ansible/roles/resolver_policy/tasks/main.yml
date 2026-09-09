@@ -1,0 +1,240 @@
+---
+# ============================================================
+# Default Route / NetworkManager Connection 탐색
+# ============================================================
+
+- name: Find default-route network device
+  ansible.builtin.shell: |
+    set -o pipefail
+    ip -4 route show default \
+      | awk 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i+1); exit}}'
+  args:
+    executable: /bin/bash
+  register: resolver_policy_default_device
+  changed_when: false
+  check_mode: false
+  failed_when: >-
+    resolver_policy_default_device.rc != 0
+    or
+    (resolver_policy_default_device.stdout | trim == "")
+
+- name: Set default-route device
+  ansible.builtin.set_fact:
+    resolver_policy_device: "{{ resolver_policy_default_device.stdout | trim }}"
+
+- name: Find active NetworkManager connection
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - GENERAL.CONNECTION
+      - device
+      - show
+      - "{{ resolver_policy_device }}"
+  register: resolver_policy_connection_result
+  changed_when: false
+  check_mode: false
+
+- name: Verify active NetworkManager connection was found
+  ansible.builtin.assert:
+    that:
+      - resolver_policy_connection_result.stdout | trim != ""
+      - resolver_policy_connection_result.stdout | trim != "--"
+    fail_msg: >-
+      No active NetworkManager connection found for
+      {{ resolver_policy_device }} on {{ inventory_hostname }}.
+
+- name: Set active NetworkManager connection
+  ansible.builtin.set_fact:
+    resolver_policy_connection: "{{ resolver_policy_connection_result.stdout | trim }}"
+
+# ============================================================
+# 현재 Resolver / Hostname 상태 수집
+# ============================================================
+
+- name: Read current IPv4 DNS search domains
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.dns-search
+      - connection
+      - show
+      - "{{ resolver_policy_connection }}"
+  register: resolver_policy_profile_search
+  changed_when: false
+  check_mode: false
+
+- name: Parse current IPv4 DNS search domains
+  ansible.builtin.set_fact:
+    resolver_policy_profile_domains: >-
+      {{
+        resolver_policy_profile_search.stdout.split(',')
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+
+- name: Read current static hostname
+  ansible.builtin.command:
+    argv:
+      - hostnamectl
+      - --static
+  register: resolver_policy_hostname
+  changed_when: false
+  check_mode: false
+
+# ============================================================
+# Legacy NetworkManager Search Domain 정합화
+# - nmcli list-property의 항목 제거 기능을 사용하여
+#   stone.test/example.com만 제거한다.
+# - 알 수 없는 제3의 Search Domain은 보존한다.
+# ============================================================
+
+- name: Remove legacy DNS search domains from NetworkManager profile
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ resolver_policy_connection }}"
+      - "-ipv4.dns-search"
+      - "{{ item }}"
+  loop: "{{ resolver_policy_legacy_search_domains }}"
+  when:
+    - not ansible_check_mode
+    - item in resolver_policy_profile_domains
+  changed_when: true
+  notify: Reapply NetworkManager resolver state
+
+# ============================================================
+# 확인된 Legacy FQDN Hostname 정합화
+# - 모든 Hostname을 inventory_hostname으로 강제하지 않는다.
+# - 명시된 Legacy 값과 정확히 일치할 때만 변경한다.
+# ============================================================
+
+- name: Reconcile confirmed legacy FQDN hostname
+  ansible.builtin.hostname:
+    name: "{{ resolver_policy_legacy_hostnames[inventory_hostname].desired }}"
+  when:
+    - not ansible_check_mode
+    - inventory_hostname in resolver_policy_legacy_hostnames
+    - >-
+      resolver_policy_hostname.stdout | trim
+      == resolver_policy_legacy_hostnames[inventory_hostname].legacy
+  notify: Reapply NetworkManager resolver state
+
+- name: Report resolver drift in check mode
+  ansible.builtin.debug:
+    msg:
+      legacy_profile_domains: >-
+        {{
+          resolver_policy_profile_domains
+          | intersect(resolver_policy_legacy_search_domains)
+        }}
+      legacy_hostname: >-
+        {{
+          (
+            resolver_policy_hostname.stdout | trim
+          )
+          if (
+            inventory_hostname in resolver_policy_legacy_hostnames
+            and
+            (
+              resolver_policy_hostname.stdout | trim
+              == resolver_policy_legacy_hostnames[inventory_hostname].legacy
+            )
+          )
+          else ''
+        }}
+  changed_when: >-
+    (
+      resolver_policy_profile_domains
+      | intersect(resolver_policy_legacy_search_domains)
+      | length
+    ) > 0
+    or
+    (
+      inventory_hostname in resolver_policy_legacy_hostnames
+      and
+      (
+        resolver_policy_hostname.stdout | trim
+        == resolver_policy_legacy_hostnames[inventory_hostname].legacy
+      )
+    )
+  when: ansible_check_mode
+
+# 검증 전에 NetworkManager resolver state를 실제 Runtime에 반영한다.
+- name: Apply pending NetworkManager resolver changes
+  ansible.builtin.meta: flush_handlers
+
+# ============================================================
+# After 상태 검증
+# ============================================================
+
+- name: Read DNS search domains after reconciliation
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.dns-search
+      - connection
+      - show
+      - "{{ resolver_policy_connection }}"
+  register: resolver_policy_profile_search_after
+  changed_when: false
+  check_mode: false
+
+- name: Parse DNS search domains after reconciliation
+  ansible.builtin.set_fact:
+    resolver_policy_profile_domains_after: >-
+      {{
+        resolver_policy_profile_search_after.stdout.split(',')
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+
+- name: Read static hostname after reconciliation
+  ansible.builtin.command:
+    argv:
+      - hostnamectl
+      - --static
+  register: resolver_policy_hostname_after
+  changed_when: false
+  check_mode: false
+
+- name: Read resolver search domains after reconciliation
+  ansible.builtin.command:
+    argv:
+      - awk
+      - '/^(search|domain)[[:space:]]/{for (i=2; i<=NF; i++) print $i}'
+      - /etc/resolv.conf
+  register: resolver_policy_resolver_search_after
+  changed_when: false
+  check_mode: false
+
+- name: Verify legacy DNS search domains are absent
+  ansible.builtin.assert:
+    that:
+      - item not in resolver_policy_profile_domains_after
+      - item not in resolver_policy_resolver_search_after.stdout_lines
+    fail_msg: >-
+      Legacy DNS search domain {{ item }} remains on {{ inventory_hostname }}.
+  loop: "{{ resolver_policy_legacy_search_domains }}"
+  when: not ansible_check_mode
+
+- name: Verify confirmed legacy hostname is reconciled
+  ansible.builtin.assert:
+    that:
+      - >-
+        resolver_policy_hostname_after.stdout | trim
+        == resolver_policy_legacy_hostnames[inventory_hostname].desired
+    fail_msg: >-
+      Legacy hostname reconciliation failed on {{ inventory_hostname }}.
+  when:
+    - not ansible_check_mode
+    - inventory_hostname in resolver_policy_legacy_hostnames
+    - >-
+      resolver_policy_hostname.stdout | trim
+      == resolver_policy_legacy_hostnames[inventory_hostname].legacy
