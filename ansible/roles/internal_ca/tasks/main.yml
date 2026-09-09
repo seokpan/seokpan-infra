@@ -112,6 +112,17 @@
   ansible.builtin.set_fact:
     internal_ca_needs_keyusage_fix: "{{ internal_ca_cert_check.stat.exists and 'X509v3 Key Usage' not in internal_ca_cert_text.stdout }}"
 
+- name: 재발급 전 Root CA의 Subject Key Identifier 저장 (동일성 검증 기준값)
+  ansible.builtin.shell: |
+    set -o pipefail
+    openssl x509 -in {{ internal_ca_cert_path }} -noout -text | grep -A1 "Subject Key Identifier" | tail -1 | xargs
+  args:
+    executable: /bin/bash
+  register: internal_ca_ski_before
+  changed_when: false
+  check_mode: false
+  when: internal_ca_needs_keyusage_fix
+
 - name: 기존 Root CA 인증서 백업
   ansible.builtin.copy:
     src: "{{ internal_ca_cert_path }}"
@@ -131,6 +142,9 @@
       -out {{ internal_ca_cert_path }}
       -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ internal_ca_common_name }}"
       -addext "keyUsage=critical,keyCertSign,cRLSign"
+      -addext "basicConstraints=critical,CA:TRUE"
+      -addext "subjectKeyIdentifier=hash"
+      -addext "authorityKeyIdentifier=keyid:always,issuer"
   when: internal_ca_needs_keyusage_fix
 
 - name: Root CA 인증서 권한 재설정 (재발급 시 갱신)
@@ -149,6 +163,40 @@
     executable: /bin/bash
   register: internal_ca_ski_after
   changed_when: false
+  when: internal_ca_needs_keyusage_fix
+
+- name: SKI 동일성 검증 (개인키 재사용 여부의 핵심 안전조건)
+  ansible.builtin.assert:
+    that:
+      - internal_ca_ski_before.stdout == internal_ca_ski_after.stdout
+    fail_msg: >-
+      재발급 전/후 Subject Key Identifier가 다릅니다. 개인키가 의도치 않게
+      변경됐을 가능성이 있으므로 즉시 중단하고 백업(ca.crt.bak-*)으로
+      원복을 검토해야 합니다.
+      Before={{ internal_ca_ski_before.stdout }}
+      After={{ internal_ca_ski_after.stdout }}
+    success_msg: "SKI 동일 확인: {{ internal_ca_ski_after.stdout }}"
+  when: internal_ca_needs_keyusage_fix
+
+- name: 재발급된 Root CA의 전체 확장 필드 조회
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
+  register: internal_ca_cert_text_after
+  changed_when: false
+  check_mode: false
+  when: internal_ca_needs_keyusage_fix
+
+- name: Root CA 필수 확장 필드 검증 (Basic Constraints / Key Usage)
+  ansible.builtin.assert:
+    that:
+      - "'CA:TRUE' in internal_ca_cert_text_after.stdout"
+      - "'Certificate Sign' in internal_ca_cert_text_after.stdout"
+      - "'CRL Sign' in internal_ca_cert_text_after.stdout"
+      - "'X509v3 Key Usage: critical' in internal_ca_cert_text_after.stdout"
+    fail_msg: >-
+      재발급된 Root CA 인증서에 필수 확장(Basic Constraints CA:TRUE,
+      critical Key Usage with Certificate Sign/CRL Sign)이 누락됐습니다.
+    success_msg: "Root CA 필수 확장 필드 검증 통과"
   when: internal_ca_needs_keyusage_fix
 
 - name: Root CA Key Usage 보정 결과 요약 출력
