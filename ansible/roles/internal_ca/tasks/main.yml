@@ -88,6 +88,74 @@
     group: root
     mode: "0644"
 
+# ============================================================
+# 5-1. 기존 Root CA에 Key Usage 확장 보정 (개인키는 재사용, 인증서만 재발급)
+# ============================================================
+# 작성자: 최유준
+# 작성 날짜: 2026-09-09
+#
+# 배경: 최초 발급된 ca.crt에 X509v3 Key Usage 확장이 누락되어, OpenSSL 3.x
+# 엄격 검증 클라이언트(Python 3.13 등)에서 CERTIFICATE_VERIFY_FAILED 발생
+# (seokpan-app Issue #58 스모크 테스트 중 발견, seokpan-infra Issue #<번호>).
+# 개인키(ca.key)는 절대 재생성하지 않고, 동일 키로 Root 인증서만 재서명한다.
+# 리프 인증서(Harbor 등) 재서명 불필요함을 수동 검증으로 실증 완료.
+
+- name: Root CA 인증서 내용 조회 (Key Usage 확장 존재 여부 판정용)
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
+  register: internal_ca_cert_text
+  changed_when: false
+  check_mode: false
+  when: internal_ca_cert_check.stat.exists
+
+- name: Root CA 재발급 필요 여부 판단
+  ansible.builtin.set_fact:
+    internal_ca_needs_keyusage_fix: "{{ internal_ca_cert_check.stat.exists and 'X509v3 Key Usage' not in internal_ca_cert_text.stdout }}"
+
+- name: 기존 Root CA 인증서 백업
+  ansible.builtin.copy:
+    src: "{{ internal_ca_cert_path }}"
+    dest: "{{ internal_ca_cert_path }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  when: internal_ca_needs_keyusage_fix
+
+- name: Root CA 인증서 재발급 (동일 개인키 재사용, Key Usage 추가)
+  ansible.builtin.command:
+    cmd: >
+      openssl req -x509 -new -nodes
+      -key {{ internal_ca_key_path }}
+      -sha256 -days {{ internal_ca_days }}
+      -out {{ internal_ca_cert_path }}
+      -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ internal_ca_common_name }}"
+      -addext "keyUsage=critical,keyCertSign,cRLSign"
+  when: internal_ca_needs_keyusage_fix
+
+- name: Root CA 인증서 권한 재설정 (재발급 시 갱신)
+  ansible.builtin.file:
+    path: "{{ internal_ca_cert_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: internal_ca_needs_keyusage_fix
+
+- name: 재발급된 Root CA의 Subject Key Identifier 확인 (기존과 동일해야 함)
+  ansible.builtin.shell: |
+    set -o pipefail
+    openssl x509 -in {{ internal_ca_cert_path }} -noout -text | grep -A1 "Subject Key Identifier"
+  args:
+    executable: /bin/bash
+  register: internal_ca_ski_after
+  changed_when: false
+  when: internal_ca_needs_keyusage_fix
+
+- name: Root CA Key Usage 보정 결과 요약 출력
+  ansible.builtin.debug:
+    msg:
+      - "Key Usage 보정 수행 여부: {{ internal_ca_needs_keyusage_fix }}"
+      - "재발급 후 SKI: {{ internal_ca_ski_after.stdout | default('변경 없음 (보정 불필요)') }}"
 
 # ============================================================
 # 6. Serial 파일 준비 (서비스 인증서 서명 시 필요, tls_deploy role이 사용)
