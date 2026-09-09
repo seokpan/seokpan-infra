@@ -132,13 +132,30 @@
   when: not _harbor_robot_exists
   no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
 
-- name: 신규 생성된 Robot Secret을 화면에 1회 안내 (로그에는 남지 않음)
+# [보안 수정, 09/09 - PR 리뷰 반영]
+# api 전용 계정과 동일한 이유로, Secret을 debug 메시지에 직접 넣어 no_log: false로
+# 출력하던 기존 방식을 제거한다. Secret 값은 stdout에 노출하지 않고 로컬 임시 파일
+# (0600 권한)로만 기록하며, debug는 파일 경로 안내만 출력한다.
+- name: 신규 생성된 Robot Secret을 로컬 임시 파일에 기록 (stdout에는 노출하지 않음)
+  ansible.builtin.copy:
+    content: "{{ _harbor_new_robot.json.secret }}"
+    dest: "/tmp/harbor_robot_secret.txt"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not _harbor_robot_exists and _harbor_new_robot.json.secret is defined
+  no_log: true
+
+- name: 신규 생성된 Robot Secret 처리 안내 (파일 경로만 출력, Secret 값 자체는 미노출)
   ansible.builtin.debug:
     msg: >-
-      Robot Account 생성 완료. 아래 값을 지금 바로 복사해서
-      'ansible-vault encrypt_string --vault-password-file <경로> "<SECRET>" --name vault_harbor_robot_secret'
-      명령으로 암호화한 뒤 group_vars/all/vault.yml에 추가하세요. 이 화면을 벗어나면 다시 볼 수 없습니다.
+      Robot Account 생성 완료. Secret 값은 stdout에 출력하지 않았습니다.
+      Ansible Controller의 /tmp/harbor_robot_secret.txt 파일을 직접 열어 확인한 뒤,
+      'ansible-vault encrypt_string --vault-password-file <경로>
+      "$(cat /tmp/harbor_robot_secret.txt)" --name vault_harbor_robot_secret'
+      명령으로 암호화해서 group_vars/all/vault.yml에 추가하세요.
+      작업이 끝나면 반드시 'shred -u /tmp/harbor_robot_secret.txt' (또는 rm -f)로
+      이 임시 파일을 즉시 삭제하세요. 이 값은 Harbor에서 다시 조회할 수 없습니다.
       Robot Name: robot${{ harbor_project_name }}+{{ harbor_robot_name }}
-      Robot Secret: {{ _harbor_new_robot.json.secret }}
   when: not _harbor_robot_exists and _harbor_new_robot.json.secret is defined
   no_log: false
