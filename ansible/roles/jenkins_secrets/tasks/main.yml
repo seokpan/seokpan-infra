@@ -1,5 +1,7 @@
 # 작성자: 최유준
 # 작성 날짜: 2026-09-02
+# (2026-09-08 수정: harbor-api-credential Secret 추가 - seokpan-app Issue #58
+#  main Image Pipeline의 Harbor REST API 전용 Robot Account용)
 #
 # [위치] harbor role이 아니라 별도 위치 — Harbor는 VM 대상 role이고 이 Task는
 # Kubernetes Cluster 대상이라 성격이 다름. stage 70-platform.yml에서, cicd Namespace가
@@ -22,11 +24,22 @@
 # BuildKit → Harbor 인증이 실패하는 문제였음. group_vars/registry/vars.yml에 이미 정의된
 # harbor_project_name / harbor_robot_name을 조합하도록 수정. 실제 클러스터에서 changed=2(1차)
 # → changed=0(재실행) 및 harbor-robot-dockerconfig username 값으로 최종 검증 완료.
+#
+# [수정 이력, 09/08 추가] harbor-api-credential Secret 신규 추가. seokpan-app Issue #58
+# (main Image Pipeline)의 Guard/Promote/Cleanup/Verify Stage가 Harbor REST API(Artifact
+# 조회, Tag 생성/삭제)를 호출하기 위한 전용 Robot Account(robot$seokpan+seokpan-api,
+# harbor role의 robot_account_api.yml에서 생성)의 Credential이다. 기존
+# harbor-robot-dockerconfig/jenkins-harbor-credential(BuildKit Push/Pull 전용 seokpan-ci
+# 계정)과는 완전히 별개 계정이며, 이 Secret은 절대 그 계정의 Credential을 참조하지 않는다.
+# jenkins-harbor-credential과 동일하게 Opaque + stringData(username/password) 형태로 두어,
+# Jenkinsfile의 container('python')에서 Jenkins Credential Binding(usernamePassword)으로
+# 바인딩해 urllib 기반 Harbor API 호출에 사용한다.
 
 - name: 필수 Vault 변수 정의 여부 확인
   ansible.builtin.assert:
     that:
       - vault_harbor_robot_secret is defined
+      - vault_harbor_api_robot_secret is defined
       - vault_jenkins_admin_username is defined
       - vault_jenkins_admin_password is defined
     fail_msg: "필수 vault 변수가 정의되지 않았습니다. group_vars/all/vault.yml 확인 필요"
@@ -103,6 +116,37 @@
 # 작성자: 최유준
 # 작성 날짜: 2026-09-08
 #
+# harbor-api-credential: Harbor REST API 전용 Robot Account(robot$seokpan+seokpan-api)의
+# Credential. seokpan-app Issue #58 main Image Pipeline의 Guard/Promote/Cleanup/Verify
+# Stage가 container('python')에서 urllib로 Harbor API(Artifact 조회, Tag 생성/삭제)를
+# 호출할 때 Jenkins Credential Binding(usernamePassword)으로 이 Secret을 참조한다.
+# 위 jenkins-harbor-credential(BuildKit Push/Pull 전용 seokpan-ci 계정)과는 완전히
+# 별개 계정/Secret이며, 절대 서로 대체하지 않는다.
+# harbor_api_robot_name 변수는 harbor role의 defaults/main.yml에 정의된
+# 접두사 없는 짧은 이름("seokpan-api")이며, username은 harbor-robot-dockerconfig와
+# 동일하게 'robot$<project>+<api_robot_name>' 형식으로 조합한다.
+- name: jenkins-harbor-api-credential Secret 적용 (Harbor REST API 전용 Robot Account)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-harbor-api-credential
+        namespace: cicd
+      stringData:
+        username: "robot${{ hostvars['harbor'].harbor_project_name }}+{{ hostvars['harbor'].harbor_api_robot_name }}"
+        password: "{{ vault_harbor_api_robot_secret }}"
+  register: jenkins_harbor_api_credential_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+# 작성자: 최유준
+# 작성 날짜: 2026-09-08
+#
 # harbor-pull-secret: kubelet이 Harbor 프라이빗 이미지를 Pull할 때 쓰는
 # imagePullSecrets 전용 Secret. 기존 harbor-robot-dockerconfig(Opaque,
 # buildctl 볼륨 마운트 전용, Issue #126)와는 목적이 달라 별도 관리함.
@@ -169,6 +213,7 @@
     - jenkins-admin
     - harbor-robot-dockerconfig
     - jenkins-harbor-credential
+    - jenkins-harbor-api-credential
     - harbor-pull-secret
   register: jenkins_secrets_summary
   delegate_to: localhost
@@ -182,4 +227,3 @@
          | map(attribute='resources')
          | map('length')
          | list }}
-
