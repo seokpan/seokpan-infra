@@ -12,6 +12,7 @@
     executable: /bin/bash
   register: resolver_policy_default_device
   changed_when: false
+  check_mode: false
   failed_when: >-
     resolver_policy_default_device.rc != 0
     or
@@ -32,6 +33,7 @@
       - "{{ resolver_policy_device }}"
   register: resolver_policy_connection_result
   changed_when: false
+  check_mode: false
 
 - name: Verify active NetworkManager connection was found
   ansible.builtin.assert:
@@ -61,6 +63,7 @@
       - "{{ resolver_policy_connection }}"
   register: resolver_policy_profile_search
   changed_when: false
+  check_mode: false
 
 - name: Parse current IPv4 DNS search domains
   ansible.builtin.set_fact:
@@ -79,6 +82,7 @@
       - --static
   register: resolver_policy_hostname
   changed_when: false
+  check_mode: false
 
 # ============================================================
 # Legacy NetworkManager Search Domain 정합화
@@ -97,7 +101,9 @@
       - "-ipv4.dns-search"
       - "{{ item }}"
   loop: "{{ resolver_policy_legacy_search_domains }}"
-  when: item in resolver_policy_profile_domains
+  when:
+    - not ansible_check_mode
+    - item in resolver_policy_profile_domains
   changed_when: true
   notify: Reapply NetworkManager resolver state
 
@@ -111,11 +117,52 @@
   ansible.builtin.hostname:
     name: "{{ resolver_policy_legacy_hostnames[inventory_hostname].desired }}"
   when:
+    - not ansible_check_mode
     - inventory_hostname in resolver_policy_legacy_hostnames
     - >-
       resolver_policy_hostname.stdout | trim
       == resolver_policy_legacy_hostnames[inventory_hostname].legacy
   notify: Reapply NetworkManager resolver state
+
+- name: Report resolver drift in check mode
+  ansible.builtin.debug:
+    msg:
+      legacy_profile_domains: >-
+        {{
+          resolver_policy_profile_domains
+          | intersect(resolver_policy_legacy_search_domains)
+        }}
+      legacy_hostname: >-
+        {{
+          (
+            resolver_policy_hostname.stdout | trim
+          )
+          if (
+            inventory_hostname in resolver_policy_legacy_hostnames
+            and
+            (
+              resolver_policy_hostname.stdout | trim
+              == resolver_policy_legacy_hostnames[inventory_hostname].legacy
+            )
+          )
+          else ''
+        }}
+  changed_when: >-
+    (
+      resolver_policy_profile_domains
+      | intersect(resolver_policy_legacy_search_domains)
+      | length
+    ) > 0
+    or
+    (
+      inventory_hostname in resolver_policy_legacy_hostnames
+      and
+      (
+        resolver_policy_hostname.stdout | trim
+        == resolver_policy_legacy_hostnames[inventory_hostname].legacy
+      )
+    )
+  when: ansible_check_mode
 
 # 검증 전에 NetworkManager resolver state를 실제 Runtime에 반영한다.
 - name: Apply pending NetworkManager resolver changes
@@ -136,6 +183,7 @@
       - "{{ resolver_policy_connection }}"
   register: resolver_policy_profile_search_after
   changed_when: false
+  check_mode: false
 
 - name: Parse DNS search domains after reconciliation
   ansible.builtin.set_fact:
@@ -154,6 +202,7 @@
       - --static
   register: resolver_policy_hostname_after
   changed_when: false
+  check_mode: false
 
 - name: Read resolver search domains after reconciliation
   ansible.builtin.command:
@@ -163,6 +212,7 @@
       - /etc/resolv.conf
   register: resolver_policy_resolver_search_after
   changed_when: false
+  check_mode: false
 
 - name: Verify legacy DNS search domains are absent
   ansible.builtin.assert:
@@ -172,6 +222,7 @@
     fail_msg: >-
       Legacy DNS search domain {{ item }} remains on {{ inventory_hostname }}.
   loop: "{{ resolver_policy_legacy_search_domains }}"
+  when: not ansible_check_mode
 
 - name: Verify confirmed legacy hostname is reconciled
   ansible.builtin.assert:
@@ -182,6 +233,7 @@
     fail_msg: >-
       Legacy hostname reconciliation failed on {{ inventory_hostname }}.
   when:
+    - not ansible_check_mode
     - inventory_hostname in resolver_policy_legacy_hostnames
     - >-
       resolver_policy_hostname.stdout | trim
