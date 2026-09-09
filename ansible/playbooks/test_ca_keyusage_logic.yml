@@ -2,181 +2,69 @@
 # 작성자: 최유준
 # 작성 날짜: 2026-09-09
 #
-# 임시 테스트 playbook. Root CA Key Usage 보정 로직(SKI 동일성 assert,
-# 필수 확장 필드 assert)이 실제로 의도대로 동작하는지 격리 검증한다.
-# 운영 CA(/etc/pki/seokpan-ca)는 전혀 건드리지 않으며, 별도 임시 디렉토리
-# (/tmp/ca_keyusage_test)에서 "Key Usage 없는 구버전 CA"를 재현한 뒤
-# roles/internal_ca/tasks/main.yml의 보정 로직과 동일한 태스크를 실행한다.
-# ConfigMap 반영 태스크는 이 테스트에 포함하지 않는다(운영 클러스터에 영향 없음).
-#
-# 검증 후 반드시 test_ca_keyusage_cleanup.yml 또는 수동으로
-# /tmp/ca_keyusage_test 를 삭제할 것.
+# roles/internal_ca/tasks/bootstrap.yml을 격리된 임시 디렉토리 대상으로
+# 직접 호출한다. 로직을 복제하지 않고 실제 프로덕션 코드를 그대로
+# 실행하므로, role과 테스트 간 drift(이전 리뷰에서 지적된 SKI 추출 방식
+# 불일치 등)가 구조적으로 발생할 수 없다. publish_configmap.yml은
+# include하지 않으므로 운영 클러스터에 영향 없음.
 
-- name: Root CA Key Usage 보정 로직 격리 검증
+- name: internal_ca bootstrap 로직 격리 검증 (실제 Role 코드 호출)
   hosts: ansible_controller
   become: true
   gather_facts: true
 
   vars:
-    test_ca_dir: /tmp/ca_keyusage_test
-    test_ca_key_path: "{{ test_ca_dir }}/ca.key"
-    test_ca_cert_path: "{{ test_ca_dir }}/ca.crt"
-    test_ca_country: KR
-    test_ca_organization: seokpan
-    test_ca_common_name: "Test CA KeyUsage Verification"
-    test_ca_days: 3650
+    internal_ca_dir: /tmp/ca_keyusage_test
+    internal_ca_key_path: "{{ internal_ca_dir }}/ca.key"
+    internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+    internal_ca_owner: root
+    internal_ca_group: root
+    internal_ca_key_bits: 4096
+    internal_ca_days: 3650
+    internal_ca_country: KR
+    internal_ca_organization: seokpan
+    internal_ca_common_name: "Test CA KeyUsage Verification"
 
   tasks:
-    # ============================================================
-    # 0. 테스트 환경 준비: Key Usage 없는 "구버전" CA 재현
-    # ============================================================
-    - name: 테스트 디렉토리 생성
+    - name: 테스트 환경 정리 (이전 실행 잔여물 제거)
       ansible.builtin.file:
-        path: "{{ test_ca_dir }}"
-        state: directory
-        mode: "0700"
+        path: "{{ internal_ca_dir }}"
+        state: absent
 
-    - name: 테스트용 CA 개인키 생성
+    - name: "[1회차] 실제 bootstrap.yml 호출 — 최초 발급 경로 검증"
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../roles/internal_ca/tasks/bootstrap.yml"
+
+    - name: 최초 발급된 CA에 필수 확장이 바로 포함됐는지 확인 (리뷰 지적 #2 검증)
       ansible.builtin.command:
-        cmd: openssl genrsa -out {{ test_ca_key_path }} 4096
-      args:
-        creates: "{{ test_ca_key_path }}"
+        cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
+      register: fresh_cert_text
+      changed_when: false
 
-    - name: 테스트용 CA 인증서 발급 (의도적으로 Key Usage 확장 없이 - 구버전 재현)
+    - name: "[검증] 최초 발급 경로 자체가 필수 확장을 포함하는지"
+      ansible.builtin.assert:
+        that:
+          - "'CA:TRUE' in fresh_cert_text.stdout"
+          - "'X509v3 Key Usage: critical' in fresh_cert_text.stdout"
+          - "'Certificate Sign' in fresh_cert_text.stdout"
+          - "'CRL Sign' in fresh_cert_text.stdout"
+        success_msg: "[검증 통과] 최초 발급 경로에서 이미 필수 확장 포함 확인"
+
+    - name: 재현을 위해 Key Usage 없는 구버전 CA로 강제 교체 (개인키는 유지)
       ansible.builtin.command:
         cmd: >
           openssl req -x509 -new -nodes
-          -key {{ test_ca_key_path }}
-          -sha256 -days {{ test_ca_days }}
-          -out {{ test_ca_cert_path }}
-          -subj "/C={{ test_ca_country }}/O={{ test_ca_organization }}/CN={{ test_ca_common_name }}"
-      args:
-        creates: "{{ test_ca_cert_path }}"
+          -key {{ internal_ca_key_path }}
+          -sha256 -days {{ internal_ca_days }}
+          -out {{ internal_ca_cert_path }}
+          -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ internal_ca_common_name }}"
+      # 의도적으로 -addext 없음 - 마이그레이션 경로 재현용
 
-    - name: 재현된 테스트 CA 상태 확인 (Key Usage 없어야 정상)
-      ansible.builtin.command:
-        cmd: openssl x509 -in {{ test_ca_cert_path }} -noout -text
-      register: test_ca_initial_state
-      changed_when: false
+    - name: "[2회차] 실제 bootstrap.yml 재호출 — 마이그레이션(보정) 경로 검증"
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../roles/internal_ca/tasks/bootstrap.yml"
 
-    - name: 재현 조건 확인 (Key Usage 미존재 assert)
-      ansible.builtin.assert:
-        that:
-          - "'X509v3 Key Usage' not in test_ca_initial_state.stdout"
-        fail_msg: >-
-          테스트 CA에 이미 Key Usage가 존재합니다. 재현 실패 -
-          이 테스트는 무의미하니 중단합니다.
-        success_msg: "테스트 CA 재현 성공: Key Usage 없음 확인"
-
-    # ============================================================
-    # 1. 실제 role 로직과 동일한 보정 태스크 (검증 대상)
-    #    roles/internal_ca/tasks/main.yml 의 5-1 섹션과 동일 로직
-    # ============================================================
-    - name: 재발급 전 SKI 저장 (동일성 검증 기준값)
-      ansible.builtin.shell: |
-        set -o pipefail
-        openssl x509 -in {{ test_ca_cert_path }} -noout -text | grep -A1 "Subject Key Identifier" | tail -1 | xargs
-      args:
-        executable: /bin/bash
-      register: test_ski_before
-      changed_when: false
-      check_mode: false
-
-    - name: 재발급 전 SKI 확인 출력
-      ansible.builtin.debug:
-        msg: "재발급 전 SKI: {{ test_ski_before.stdout }}"
-
-    - name: 테스트 CA 인증서 백업
-      ansible.builtin.copy:
-        src: "{{ test_ca_cert_path }}"
-        dest: "{{ test_ca_cert_path }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
-        remote_src: true
-        mode: "0644"
-
-    - name: 테스트 CA 인증서 재발급 (동일 개인키 재사용, Key Usage 등 확장 추가)
-      ansible.builtin.command:
-        cmd: >
-          openssl req -x509 -new -nodes
-          -key {{ test_ca_key_path }}
-          -sha256 -days {{ test_ca_days }}
-          -out {{ test_ca_cert_path }}
-          -subj "/C={{ test_ca_country }}/O={{ test_ca_organization }}/CN={{ test_ca_common_name }}"
-          -addext "keyUsage=critical,keyCertSign,cRLSign"
-          -addext "basicConstraints=critical,CA:TRUE"
-          -addext "subjectKeyIdentifier=hash"
-          -addext "authorityKeyIdentifier=keyid:always,issuer"
-
-    - name: 재발급된 테스트 CA의 SKI 확인
-      ansible.builtin.shell: |
-        set -o pipefail
-        openssl x509 -in {{ test_ca_cert_path }} -noout -text | grep -A1 "Subject Key Identifier" | tail -1 | xargs
-      args:
-        executable: /bin/bash
-      register: test_ski_after
-      changed_when: false
-      check_mode: false
-
-    - name: 재발급 후 SKI 확인 출력
-      ansible.builtin.debug:
-        msg: "재발급 후 SKI: {{ test_ski_after.stdout }}"
-
-    - name: "[검증 1] SKI 동일성 assert"
-      ansible.builtin.assert:
-        that:
-          - test_ski_before.stdout == test_ski_after.stdout
-        fail_msg: >-
-          SKI 동일성 검증 실패.
-          Before={{ test_ski_before.stdout }}
-          After={{ test_ski_after.stdout }}
-        success_msg: "[검증 1 통과] SKI 동일 확인: {{ test_ski_after.stdout }}"
-
-    - name: 재발급된 테스트 CA의 전체 확장 필드 조회
-      ansible.builtin.command:
-        cmd: openssl x509 -in {{ test_ca_cert_path }} -noout -text
-      register: test_cert_text_after
-      changed_when: false
-      check_mode: false
-
-    - name: "[검증 2] 필수 확장 필드 assert"
-      ansible.builtin.assert:
-        that:
-          - "'CA:TRUE' in test_cert_text_after.stdout"
-          - "'Certificate Sign' in test_cert_text_after.stdout"
-          - "'CRL Sign' in test_cert_text_after.stdout"
-          - "'X509v3 Key Usage: critical' in test_cert_text_after.stdout"
-        fail_msg: "필수 확장 필드(Basic Constraints/Key Usage) 검증 실패"
-        success_msg: "[검증 2 통과] Root CA 필수 확장 필드 확인"
-
-    # ============================================================
-    # 3. 부가 검증: 실제 리프 인증서 유효성까지 재확인 (선택)
-    # ============================================================
-    - name: "[검증 3] 테스트 CA로 자체 서명한 임시 리프 인증서로 체인 검증 (선택적 부가 검증)"
-      ansible.builtin.shell: |
-        set -o pipefail
-        cd {{ test_ca_dir }}
-        openssl genrsa -out leaf.key 2048
-        openssl req -new -key leaf.key -out leaf.csr -subj "/C=KR/O=seokpan/CN=test-leaf.seokpan.internal"
-        openssl x509 -req -in leaf.csr -CA {{ test_ca_cert_path }} -CAkey {{ test_ca_key_path }} \
-          -CAcreateserial -out leaf.crt -days 30 -sha256
-        openssl verify -CAfile {{ test_ca_cert_path }} leaf.crt
-      args:
-        executable: /bin/bash
-      register: test_leaf_verify
-      changed_when: false
-
-    - name: "[검증 3] 리프 인증서 체인 검증 결과 확인"
-      ansible.builtin.assert:
-        that:
-          - "'OK' in test_leaf_verify.stdout"
-        fail_msg: "재발급된 테스트 CA로 리프 인증서 체인 검증 실패"
-        success_msg: "[검증 3 통과] 리프 인증서 체인 검증: {{ test_leaf_verify.stdout }}"
-
-    - name: 최종 요약
-      ansible.builtin.debug:
-        msg:
-          - "=== 전체 검증 통과 ==="
-          - "SKI 동일성: PASS"
-          - "필수 확장 필드: PASS"
-          - "리프 인증서 체인 검증: PASS"
-          - "이 결과는 roles/internal_ca/tasks/main.yml 의 보정 로직이"
-          - "실제로 의도대로 동작함을 격리 환경에서 실증한 것입니다."
+    - name: 정리
+      ansible.builtin.file:
+        path: "{{ internal_ca_dir }}"
+        state: absent
