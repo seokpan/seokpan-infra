@@ -30,8 +30,9 @@
 #   1) Project ID 조회 (harbor_project_name 기준)
 #   2) q=Level=project,ProjectID=<id> 필터로 동일 이름의 Robot Account가 이미 있는지 조회
 #   3) 있으면 생성을 건너뛰고 "이미 존재함, Secret은 Vault에 이미 있어야 함" 안내만 출력
-#   4) 없으면 새로 생성하고, 그 즉시 화면에 1회성 안내로만 노출
-#      → 이후 사람이 수동으로 ansible-vault encrypt_string으로 group_vars/all/vault.yml에 추가
+#   4) 없으면 새로 생성하고, Secret을 예측 불가능한 경로의 임시 파일(0600)에 기록한 뒤
+#      사람이 Vault에 등록을 마칠 때까지 대기했다가 자동으로 삭제 (하단 09/09 수정 이력 참고,
+#      Secret 값 자체는 no_log: true로 stdout/Ansible 로그에 노출하지 않음)
 #
 # [선행 조건] harbor_project.yml이 먼저 실행되어 Project가 존재해야 함.
 
@@ -132,37 +133,75 @@
   when: not _harbor_api_robot_exists
   no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
 
-# [보안 수정, 09/09 - PR 리뷰 반영]
-# 기존에는 생성된 Secret을 ansible.builtin.debug 메시지에 직접 넣어 no_log: false로
-# 출력했으나, 이는 Ansible stdout/터미널 스크롤백/실행 로그 캡처 등에 평문 Secret이
-# 남을 수 있는 실제 유출 경로다("화면에 잠깐 표시"가 안전을 보장하지 않음). #158의
-# "Secret은 Vault에만 저장하고 Git/로그에 평문 노출하지 않는다" 원칙과 정면으로
-# 충돌하므로, Secret 값 자체는 표준 출력에 절대 나타나지 않도록 변경한다.
+# [보안 수정, 09/09 - PR 리뷰 2차 반영]
+# 1차 수정(debug 메시지에 Secret 직접 출력 제거)만으로는 부족했다. 고정 경로
+# (/tmp/harbor_api_robot_secret.txt)에 평문 파일을 남기고 사람이 수동으로
+# shred/rm 하도록 한 절차는, 정상 종료·중단·세션 이탈·운영자 실수 시 평문
+# Secret 파일이 Controller에 장시간 잔존할 수 있는 구조였다(#158의 "Secret은
+# Vault에만 저장하고 로그/저장소에 평문을 남기지 않는다" 원칙과 충돌).
 #
-# 대신 Secret을 Ansible Controller 로컬의 임시 파일(0600 권한, root/실행자만 읽기 가능)에
-# 직접 기록하고, debug는 "이 파일 경로를 직접 열어서 확인하라"는 안내만 출력한다.
-# 사람이 그 파일을 열어 ansible-vault encrypt_string으로 암호화해 vault.yml에 추가한
-# 뒤, 반드시 이 임시 파일을 즉시 삭제해야 한다(아래 안내 메시지에 명시).
-- name: 신규 생성된 API Robot Secret을 로컬 임시 파일에 기록 (stdout에는 노출하지 않음)
-  ansible.builtin.copy:
-    content: "{{ _harbor_new_api_robot.json.secret }}"
-    dest: "/tmp/harbor_api_robot_secret.txt"
-    mode: "0600"
-  delegate_to: localhost
-  become: false
+# 그래서 파일 lifecycle을 Ansible이 직접 보장하도록 아래처럼 변경한다:
+#   1) ansible.builtin.tempfile로 예측 불가능한 경로에 0600 권한으로 생성
+#      (고정 경로 대신 무작위 경로 - 다른 프로세스/사용자가 경로를 추측해
+#      접근하는 것을 방지)
+#   2) block/always로 감싸서, 아래 순서가 정상 종료되든 중간에 실패하든
+#      always에서 반드시 파일 삭제를 시도한다.
+#   3) 단, 삭제가 사람이 파일 내용을 실제로 사용하기 전에 일어나면 안 되므로
+#      (Ansible은 동기 실행이라 debug 직후 always가 바로 실행되어 버림),
+#      ansible.builtin.pause로 "Vault 등록을 마치고 Enter를 눌러야 다음 단계
+#      (=파일 삭제)로 진행"되도록 명시적 확인 지점을 둔다.
+#   4) Ctrl-C 등 이례적 중단 시에도 Ansible이 always 블록 실행을 시도하지만,
+#      프로세스가 강제 종료(kill -9)되는 경우까지는 보장할 수 없다 - 이 경우
+#      운영자가 수동으로 파일이 남아있는지 확인 후 삭제해야 한다(잔존 가능성은
+#      남아 있으나, 정상적인 흐름에서는 항상 자동 정리됨).
+# Secret 값 자체는 여전히 no_log: true로 stdout/로그에 노출하지 않는다.
+- name: 신규 API Robot Secret 처리 (임시 파일 생성 → Vault 등록 대기 → 자동 정리)
   when: not _harbor_api_robot_exists and _harbor_new_api_robot.json.secret is defined
-  no_log: true
+  block:
+    - name: 예측 불가능한 임시 파일 경로 생성 (0600)
+      ansible.builtin.tempfile:
+        state: file
+        suffix: "_harbor_api_robot_secret"
+      register: _harbor_api_robot_secret_tempfile
+      delegate_to: localhost
+      become: false
 
-- name: 신규 생성된 API Robot Secret 처리 안내 (파일 경로만 출력, Secret 값 자체는 미노출)
-  ansible.builtin.debug:
-    msg: >-
-      Robot Account 생성 완료. Secret 값은 stdout에 출력하지 않았습니다.
-      Ansible Controller의 /tmp/harbor_api_robot_secret.txt 파일을 직접 열어 확인한 뒤,
-      'ansible-vault encrypt_string --vault-password-file <경로>
-      "$(cat /tmp/harbor_api_robot_secret.txt)" --name vault_harbor_api_robot_secret'
-      명령으로 암호화해서 group_vars/all/vault.yml에 추가하세요.
-      작업이 끝나면 반드시 'shred -u /tmp/harbor_api_robot_secret.txt' (또는 rm -f)로
-      이 임시 파일을 즉시 삭제하세요. 이 값은 Harbor에서 다시 조회할 수 없습니다.
-      Robot Name: robot${{ harbor_project_name }}+{{ harbor_api_robot_name }}
-  when: not _harbor_api_robot_exists and _harbor_new_api_robot.json.secret is defined
-  no_log: false
+    - name: API Robot Secret을 임시 파일에 기록 (stdout에는 노출하지 않음)
+      ansible.builtin.copy:
+        content: "{{ _harbor_new_api_robot.json.secret }}"
+        dest: "{{ _harbor_api_robot_secret_tempfile.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: API Robot Secret 처리 안내 (파일 경로만 출력, Secret 값 자체는 미노출)
+      ansible.builtin.debug:
+        msg: >-
+          Robot Account 생성 완료. Secret 값은 stdout에 출력하지 않았습니다.
+          Ansible Controller의 {{ _harbor_api_robot_secret_tempfile.path }} 파일을 지금
+          다른 터미널에서 열어 확인하고, 'ansible-vault encrypt_string
+          --vault-password-file <경로> "$(cat {{ _harbor_api_robot_secret_tempfile.path }})"
+          --name vault_harbor_api_robot_secret' 명령으로 암호화해서
+          group_vars/all/vault.yml에 추가하세요.
+          Robot Name: robot${{ harbor_project_name }}+{{ harbor_api_robot_name }}
+          이 값은 Harbor에서 다시 조회할 수 없습니다. Vault 등록을 마쳤으면 아래
+          Enter 입력 시 이 임시 파일이 자동으로 삭제됩니다.
+
+    - name: Vault 등록 완료 대기 (Enter 입력 시 다음 단계=파일 삭제로 진행)
+      ansible.builtin.pause:
+        prompt: >-
+          위 Secret을 group_vars/all/vault.yml에 암호화 등록했으면 Enter를 누르세요.
+          계속하면 임시 파일이 즉시 삭제됩니다
+      delegate_to: localhost
+      become: false
+  always:
+    - name: 임시 Secret 파일 정리 (성공/실패 무관 항상 삭제 시도)
+      ansible.builtin.file:
+        path: "{{ _harbor_api_robot_secret_tempfile.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: >-
+        _harbor_api_robot_secret_tempfile is defined
+        and _harbor_api_robot_secret_tempfile.path is defined
