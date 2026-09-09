@@ -140,8 +140,7 @@
     executable: /bin/bash
   register: internal_ca_ski_after
   changed_when: false
-  check_mode: false
-  when: internal_ca_needs_keyusage_fix
+  when: internal_ca_needs_keyusage_fix and not ansible_check_mode
 
 - name: SKI 동일성 검증 (개인키 재사용 여부의 핵심 안전조건)
   ansible.builtin.assert:
@@ -153,15 +152,14 @@
       원복을 검토해야 합니다.
       Before={{ internal_ca_ski_before.stdout }} After={{ internal_ca_ski_after.stdout }}
     success_msg: "SKI 동일 확인: {{ internal_ca_ski_after.stdout }}"
-  when: internal_ca_needs_keyusage_fix
+  when: internal_ca_needs_keyusage_fix and not ansible_check_mode
 
 - name: 재발급된 Root CA의 전체 확장 필드 조회
   ansible.builtin.command:
     cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
   register: internal_ca_cert_text_after
   changed_when: false
-  check_mode: false
-  when: internal_ca_needs_keyusage_fix
+  when: internal_ca_needs_keyusage_fix and not ansible_check_mode
 
 - name: Root CA 필수 확장 필드 검증 (Desired State 판정과 동일 기준)
   ansible.builtin.assert:
@@ -172,7 +170,15 @@
       - "'CRL Sign' in internal_ca_cert_text_after.stdout"
     fail_msg: "재발급된 Root CA 인증서에 필수 확장이 누락됐습니다."
     success_msg: "Root CA 필수 확장 필드 검증 통과"
-  when: internal_ca_needs_keyusage_fix
+  when: internal_ca_needs_keyusage_fix and not ansible_check_mode
+
+- name: "[Check Mode] 보정 필요 상태 안내 (실제 재발급/검증은 미수행)"
+  ansible.builtin.debug:
+    msg: >-
+      [dry-run] Root CA에 필수 확장이 누락되어 보정이 필요합니다.
+      실제 실행 시 개인키 재사용 방식으로 재발급되며, 재발급 전/후
+      SKI 동일성 및 필수 확장 필드가 자동 검증됩니다.
+  when: internal_ca_needs_keyusage_fix and ansible_check_mode
 
 - name: Root CA Key Usage 보정 결과 요약 출력
   ansible.builtin.debug:
