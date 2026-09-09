@@ -1,5 +1,6 @@
 # 작성자: 최유준
 # 작성 날짜: 2026-08-28
+# (2026-09-08 수정: Robot Account 조회 필터 결함 수정)
 #
 # [위치] 기존 ~/seokpan-infra/ansible/roles/harbor/tasks/ 안에 robot_account.yml로 추가,
 # main.yml에서 include_tasks로 연결 (Project 생성 이후, GC 정책 설정 이전 정도 위치 권장).
@@ -12,49 +13,94 @@
 #
 # [멱등성 주의] Harbor API로 Robot Secret은 생성 시점에 딱 한 번만 응답에 포함되고,
 # 이후 조회로는 다시 얻을 수 없습니다. 그래서 이 Task는:
-#   1) 동일 이름의 Robot Account가 이미 있는지 먼저 조회
-#   2) 있으면 생성을 건너뛰고 "이미 존재함, Secret은 Vault에 이미 있어야 함" 안내만 출력
-#   3) 없으면 새로 생성하고, 그 즉시 화면에 1회성 안내로만 노출 (no_log로 Ansible 로그/Evidence에는 안 남김)
-#      → 이후 사람이 수동으로 ansible-vault encrypt_string으로 group_vars/all/vault.yml에 추가
+#   1) Project ID 조회
+#   2) 동일 이름의 Robot Account가 이미 있는지 project-scope 필터로 조회
+#   3) 있으면 생성을 건너뛰고 "이미 존재함, Secret은 Vault에 이미 있어야 함" 안내만 출력
+#   4) 없으면 새로 생성하고, Secret을 예측 불가능한 경로의 임시 파일(0600)에 기록한 뒤
+#      사람이 Vault에 등록을 마칠 때까지 대기했다가 자동으로 삭제 (하단 09/09 수정 이력 참고,
+#      Secret 값 자체는 no_log: true로 stdout/Ansible 로그에 노출하지 않음)
 #
 # [TODO] Harbor Admin 인증 정보는 admin 계정 고정(Harbor 기본 관리자, 변경 불가) +
 # 기존 harbor role이 쓰는 harbor_admin_password 변수 그대로 재사용.
 #
 # [선행 조건] harbor_project.yml이 먼저 실행되어 Project가 존재해야 함 (main.yml에서 순서 주의:
 # harbor_project.yml → robot_account.yml 순).
+#
+# [2026-09-08 수정 이력 - 조회 필터 결함]
+# 기존에는 필터 없이 GET /api/v2.0/robots를 호출해서 이름을 search(부분 일치)로 찾았으나,
+# 이 API는 필터 없이 호출하면 project-level Robot Account가 조회 결과에 전혀 잡히지 않는다
+# (X-Total-Count: 0으로 응답, 실제 계정이 있어도 빈 배열). 그래서 _harbor_robot_exists가
+# 항상 false로 오판되고, 재실행 시 매번 생성을 시도하다 409 Conflict를 status_code로
+# 방어해서 겉보기엔 문제없이 넘어가는 상태였다(신규 계정이 실제로 또 생기지는 않았으나,
+# "이미 존재하면 skip" 로직 자체가 죽어있었음). 이를 아래처럼 수정한다:
+#   1) Project ID를 먼저 조회
+#   2) GET /api/v2.0/robots?q=Level=project,ProjectID=<id> 필터로 project-scope 계정만 조회
+#      (Level=project만 넘기면 400: "must with project ID when to query project robots")
+#   3) 이름은 search(부분 일치)가 아니라 equalto(정확 일치)로 비교
+#      ('robot$' + harbor_project_name + '+' + harbor_robot_name 전체 형태와 정확히 비교)
+# (동일 결함/수정 패턴이 robot_account_api.yml에도 적용되어 있음 - API 전용 신규 계정)
 
-# [API 경로 수정, 08/28] Harbor v2 API에는 /api/v2.0/projects/{project}/robots 경로가
-# 없습니다 (404 확인됨). Robot Account는 /api/v2.0/robots (전체 목록)로 조회하고
-# 이름으로 필터링해야 합니다.
-
-- name: Harbor Robot Account 전체 목록 조회
+- name: Harbor Project ID 조회 (Robot Account용)
   ansible.builtin.uri:
-    url: "https://{{ harbor_hostname }}/api/v2.0/robots"
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name }}"
     method: GET
     user: admin
     password: "{{ harbor_admin_password }}"
     force_basic_auth: true
     validate_certs: false
-    status_code: [200, 409]
+    status_code: 200
+  register: _harbor_robot_project_lookup
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Harbor Project ID 확정 (Robot Account용)
+  ansible.builtin.set_fact:
+    _harbor_robot_project_id: >-
+      {{ (_harbor_robot_project_lookup.json
+          | selectattr('name', 'equalto', harbor_project_name)
+          | map(attribute='project_id')
+          | first) }}
+
+- name: Harbor Project ID 검증 (Robot Account용)
+  ansible.builtin.assert:
+    that:
+      - _harbor_robot_project_id is defined
+      - (_harbor_robot_project_id | string | length) > 0
+    fail_msg: >-
+      Harbor Project '{{ harbor_project_name }}'의 project_id를 확인할 수 없습니다.
+      harbor_project.yml이 먼저 실행되었는지 확인하세요.
+
+- name: Harbor Robot Account 목록 조회 (project-scope 필터 필수)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/robots?q=Level%3Dproject%2CProjectID%3D{{ _harbor_robot_project_id }}&page_size=100"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
   register: _harbor_existing_robots
   changed_when: false
   check_mode: false
   no_log: true   # 응답 자체에 민감정보는 없지만 습관적으로 최소 노출 원칙 적용
 
-- name: 기존 Robot Account 이름 목록 추출
+- name: 기존 Robot Account 존재 여부 확인 (전체 이름 정확히 일치)
   ansible.builtin.set_fact:
     _harbor_robot_exists: >-
       {{ _harbor_existing_robots.json
-         | selectattr('name', 'search', harbor_robot_name)
+         | selectattr('name', 'equalto', 'robot$' + harbor_project_name + '+' + harbor_robot_name)
          | list | length > 0 }}
-  # [주의] Harbor의 Robot 전체 이름 형식(robot$<project>+<name> 등)이 버전/설정에 따라
-  # 다를 수 있어서 정확한 등호 매칭 대신 이름에 harbor_robot_name이 포함되는지로 느슨하게 확인합니다.
-  # 실행 후 실제 이름 형식이 다르면 이 필터를 조정해야 할 수 있습니다.
+  # [주의] harbor_robot_name 변수는 접두사 없는 짧은 이름('seokpan-ci' 등)이라고 가정하고
+  # 'robot$<project>+<name>' 형태로 조합해 정확히 비교한다. 만약 이 변수가 이미
+  # 'robot$seokpan+seokpan-ci' 형태의 전체 이름을 담고 있다면, 아래처럼 조합 없이
+  # 바로 비교하도록 이 식을 수정해야 한다:
+  #   selectattr('name', 'equalto', harbor_robot_name)
 
 - name: Robot Account가 이미 존재하면 재생성하지 않고 안내만 출력
   ansible.builtin.debug:
     msg: >-
-      Robot Account 'robot${{ harbor_robot_name }}'가 이미 존재합니다.
+      Robot Account 'robot${{ harbor_project_name }}+{{ harbor_robot_name }}'가 이미 존재합니다.
       Secret은 최초 생성 시에만 노출되므로, group_vars/all/vault.yml에
       vault_harbor_robot_secret 값이 이미 등록되어 있는지 확인하세요.
       (없다면 Harbor UI에서 기존 Robot을 삭제하고 이 Task를 재실행해야 새 Secret을 받을 수 있습니다.)
@@ -84,16 +130,62 @@
               action: pull
     status_code: [201, 409]
   register: _harbor_new_robot
-#  no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
   when: not _harbor_robot_exists
+  no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
 
-- name: 신규 생성된 Robot Secret을 화면에 1회 안내 (로그에는 남지 않음)
-  ansible.builtin.debug:
-    msg: >-
-      Robot Account 생성 완료. 아래 값을 지금 바로 복사해서
-      'ansible-vault encrypt_string --vault-password-file <경로> "<SECRET>" --name vault_harbor_robot_secret'
-      명령으로 암호화한 뒤 group_vars/all/vault.yml에 추가하세요. 이 화면을 벗어나면 다시 볼 수 없습니다.
-      Robot Name: robot${{ harbor_robot_name }}
-      Robot Secret: {{ _harbor_new_robot.json.secret }}
-  when: not _harbor_robot_exists and _harbor_new_robot.json.secret is defined   # ← 안전장치 추가
-  no_log: false
+# [보안 수정, 09/09 - PR 리뷰 2차 반영]
+# API 전용 계정(robot_account_api.yml)과 동일한 이유로, 고정 경로(/tmp/harbor_robot_secret.txt)에
+# 평문 파일을 남기고 사람이 수동으로 삭제하도록 한 1차 수정본도 lifecycle을 보장하지 못해
+# 부족했다. tempfile로 예측 불가능한 경로에 0600으로 생성하고, block/always로 감싸 정상/실패
+# 종료 모두에서 자동 삭제를 시도한다. 삭제가 사람이 Vault 등록을 마치기 전에 일어나지 않도록
+# pause로 명시적 확인 지점을 둔다. Secret 값 자체는 no_log: true로 계속 stdout/로그에 미노출.
+- name: 신규 Robot Secret 처리 (임시 파일 생성 → Vault 등록 대기 → 자동 정리)
+  when: not _harbor_robot_exists and _harbor_new_robot.json.secret is defined
+  block:
+    - name: 예측 불가능한 임시 파일 경로 생성 (0600)
+      ansible.builtin.tempfile:
+        state: file
+        suffix: "_harbor_robot_secret"
+      register: _harbor_robot_secret_tempfile
+      delegate_to: localhost
+      become: false
+
+    - name: Robot Secret을 임시 파일에 기록 (stdout에는 노출하지 않음)
+      ansible.builtin.copy:
+        content: "{{ _harbor_new_robot.json.secret }}"
+        dest: "{{ _harbor_robot_secret_tempfile.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Robot Secret 처리 안내 (파일 경로만 출력, Secret 값 자체는 미노출)
+      ansible.builtin.debug:
+        msg: >-
+          Robot Account 생성 완료. Secret 값은 stdout에 출력하지 않았습니다.
+          Ansible Controller의 {{ _harbor_robot_secret_tempfile.path }} 파일을 지금
+          다른 터미널에서 열어 확인하고, 'ansible-vault encrypt_string
+          --vault-password-file <경로> "$(cat {{ _harbor_robot_secret_tempfile.path }})"
+          --name vault_harbor_robot_secret' 명령으로 암호화해서
+          group_vars/all/vault.yml에 추가하세요.
+          Robot Name: robot${{ harbor_project_name }}+{{ harbor_robot_name }}
+          이 값은 Harbor에서 다시 조회할 수 없습니다. Vault 등록을 마쳤으면 아래
+          Enter 입력 시 이 임시 파일이 자동으로 삭제됩니다.
+
+    - name: Vault 등록 완료 대기 (Enter 입력 시 다음 단계=파일 삭제로 진행)
+      ansible.builtin.pause:
+        prompt: >-
+          위 Secret을 group_vars/all/vault.yml에 암호화 등록했으면 Enter를 누르세요.
+          계속하면 임시 파일이 즉시 삭제됩니다
+      delegate_to: localhost
+      become: false
+  always:
+    - name: 임시 Secret 파일 정리 (성공/실패 무관 항상 삭제 시도)
+      ansible.builtin.file:
+        path: "{{ _harbor_robot_secret_tempfile.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: >-
+        _harbor_robot_secret_tempfile is defined
+        and _harbor_robot_secret_tempfile.path is defined
