@@ -45,6 +45,14 @@ backup_transfer_role_stabilize_retry_interval_seconds: 300
 # 파일명을 GTID 전용이던 기존(.last_backup_gtid)에서 의미에 맞게 변경
 backup_transfer_state_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain_state.json"
 
+# 이슈 #166 리뷰 반영: 두 DB 호스트 간 백업 실행/상태 갱신을 직렬화하는 공유 lock.
+# state_file과 동일한 NFS 디렉터리 사용 (prepare.yml에서 이미 0700으로 생성됨,
+# 별도 디렉터리 생성 태스크 불필요)
+backup_transfer_lock_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain.lock"
+# lock 획득 대기 시간(초) — 이 시간 내 못 받으면 다른 프로세스가 이미 이번
+# 사이클을 처리 중이라는 뜻이므로 에러가 아닌 정상 스킵(exit 0)으로 처리
+backup_transfer_lock_wait_seconds: 30
+
 # 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
 backup_restore_target_dir: /var/lib/mysql-restore-test
 backup_restore_socket: /var/lib/mysql-restore-test/mariadb-restore.sock
