@@ -51,7 +51,7 @@ backup_transfer_state_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backu
 backup_transfer_lock_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain.lock"
 # lock 획득 대기 시간(초) — 이 시간 내 못 받으면 다른 프로세스가 이미 이번
 # 사이클을 처리 중이라는 뜻이므로 에러가 아닌 정상 스킵(exit 0)으로 처리
-backup_transfer_lock_wait_seconds: 30
+backup_transfer_lock_wait_seconds: 60
 
 # 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
 backup_restore_target_dir: /var/lib/mysql-restore-test
