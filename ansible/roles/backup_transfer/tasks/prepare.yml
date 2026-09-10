@@ -87,6 +87,14 @@
   ansible.builtin.command: mount {{ backup_transfer_nfs_mount_point }}
   when: nfs_mount_check.rc != 0
 
+- name: 체인 상태 파일용 NFS 공유 디렉터리 생성 (이슈 #166 — 상태 authority NFS 이전)
+  ansible.builtin.file:
+    path: "{{ backup_transfer_nfs_mount_point }}/.state"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
 - name: backup_svc 인증 파일 배포 (평문 비밀번호가 role 코드/문서에 남지 않도록 Vault 참조만 사용)
   ansible.builtin.template:
     src: backup_svc.cnf.j2

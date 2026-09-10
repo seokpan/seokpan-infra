@@ -43,7 +43,19 @@ backup_transfer_role_stabilize_retry_interval_seconds: 300
 # 이슈 #114: 체인 상태(JSON)를 기록 — chain_dir(진행 중인 체인), last_backup_dir(다음
 # Incremental의 --incremental-basedir), last_gtid(변경 없으면 백업 자체 스킵, Full/Incremental 공통)
 # 파일명을 GTID 전용이던 기존(.last_backup_gtid)에서 의미에 맞게 변경
-backup_transfer_state_file: "{{ backup_transfer_local_base_dir }}/.backup_chain_state.json"
+backup_transfer_state_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain_state.json"
+
+# 이슈 #166 리뷰 반영: 두 DB 호스트 간 백업 실행/상태 갱신을 직렬화하는 공유 lock.
+# state_file과 동일한 NFS 디렉터리 사용 (prepare.yml에서 이미 0700으로 생성됨,
+# 별도 디렉터리 생성 태스크 불필요)
+backup_transfer_lock_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain.lock"
+# lock은 non-blocking(flock -n)으로만 시도한다 — 대기 시간 개념 자체가 없음.
+# 이유(2차 리뷰 반영): -w(대기) 방식은 겹쳤을 때 "먼저 쓰던 쪽이 빨리 끝나면
+# 뒤쪽도 순서대로 진입"할 수 있어, "겹치면 무조건 이번 사이클은 넘긴다"는
+# 정책이 코드로 보장되지 않았다. -n은 겹친 게 확인되는 즉시 무조건 포기시켜
+# 이 정책을 명확히 한다. 스킵된 실행은 재시도되지 않고 다음 정기 cron
+# 트리거(Incremental: 다음 날, Full: 다음 주 수요일)를 기다린다 — 이는
+# 기존 GTID 미변경 스킵과 동일한 RPO 성겨짐 모델을 따른다(스크립트 헤더 참고).
 
 # 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
 backup_restore_target_dir: /var/lib/mysql-restore-test
