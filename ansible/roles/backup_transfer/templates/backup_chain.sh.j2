@@ -219,7 +219,11 @@ BACKUP_DIR="${LOCAL_BASE_DIR}/${CHAIN_DIR}/${BACKUP_SUBDIR}"
 mkdir -p "${BACKUP_DIR}"
 
 # 7. 백업 실행 (Full은 신규, Incremental은 --incremental-basedir로 직전 백업 지정)
-BACKUP_LOG_MARKER_START=$(wc -l < "${LOG_DIR}/mariadb_backup.log" 2>/dev/null || echo 0)
+if [ -f "${LOG_DIR}/mariadb_backup.log" ]; then
+  BACKUP_LOG_MARKER_START=$(wc -l < "${LOG_DIR}/mariadb_backup.log")
+else
+  BACKUP_LOG_MARKER_START=0
+fi
 
 if [ "${MODE}" = "full" ]; then
   mariadb-backup --defaults-extra-file="${CRED_FILE}" --backup \
