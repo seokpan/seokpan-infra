@@ -33,7 +33,6 @@ RETENTION_DAYS={{ backup_transfer_retention_days }}
 LOG_DIR="{{ backup_transfer_log_dir }}"
 STATE_FILE="{{ backup_transfer_state_file }}"
 LOCK_FILE="{{ backup_transfer_lock_file }}"
-LOCK_WAIT_SECONDS={{ backup_transfer_lock_wait_seconds }}
 MAX_RETRIES={{ backup_transfer_role_stabilize_max_retries }}
 RETRY_INTERVAL={{ backup_transfer_role_stabilize_retry_interval_seconds }}
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -119,14 +118,20 @@ if [ "${ROLE_CONFIRMED_REPLICA}" != "true" ]; then
   exit 0
 fi
 
-# 1-1. 공유 실행 lock 획득 (이슈 #166 리뷰 반영 — 두 호스트 간 read-modify-write 직렬화)
-#      이 시점부터 마지막 state_set까지 전체 구간을 잠금으로 감싼다. flock은
-#      fd 생명주기에 종속되므로, set -euo pipefail로 인한 모든 조기 종료
-#      경로를 포함해 스크립트가 끝나면 커널이 자동으로 lock을 해제한다 —
-#      별도의 명시적 해제(flock -u) 코드가 필요 없다.
++# 1-1. 공유 실행 lock 획득 (이슈 #166 리뷰 반영 — 두 호스트 간 read-modify-write 직렬화)
++#      이 시점부터 마지막 state_set까지 전체 구간을 잠금으로 감싼다. flock은
++#      fd 생명주기에 종속되므로, set -euo pipefail로 인한 모든 조기 종료
++#      경로를 포함해 스크립트가 끝나면 커널이 자동으로 lock을 해제한다 —
++#      별도의 명시적 해제(flock -u) 코드가 필요 없다.
++#      non-blocking(-n)을 쓰는 이유(2차 리뷰 반영): -w(대기) 방식은 겹쳤을 때
++#      먼저 쓰던 쪽이 대기 시간 내 빨리 끝나면 뒤쪽도 순서대로 진입할 수 있어,
++#      "겹치면 이번 사이클은 무조건 넘긴다"는 정책이 보장되지 않았다. -n은
++#      겹친 게 확인되는 즉시 무조건 포기시켜 이 정책을 코드로 명확히 한다.
++#      스킵된 실행은 재시도하지 않고 다음 정기 cron까지 기다린다 — 기존
++#      GTID 미변경 스킵과 동일한 RPO 성겨짐 모델(스크립트 헤더 참고).
 exec 200>"${LOCK_FILE}"
-if ! flock -w "${LOCK_WAIT_SECONDS}" -x 200; then
-  log "다른 백업 실행이 이미 진행 중으로 판단(lock 획득 실패, ${LOCK_WAIT_SECONDS}초 대기 초과) — 이번 실행은 스킵합니다."
++if ! flock -n -x 200; then
++  log "다른 백업 실행이 이미 진행 중으로 판단(lock 즉시 획득 실패) — 이번 실행은 스킵합니다. 다음 정기 cron에서 재시도됩니다."
   exit 0
 fi
 log "공유 lock 획득 완료 — 이후 상태 읽기부터 상태 갱신까지 단일 writer로 진행합니다."
