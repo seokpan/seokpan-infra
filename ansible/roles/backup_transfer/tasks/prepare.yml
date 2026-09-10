@@ -27,6 +27,23 @@
     group: root
     mode: "0700"
 
+- name: 백업 Base 디렉터리 immutable 속성 확인 (2026-09-10 mariadb-01 EPERM 장애 대응)
+  ansible.builtin.command: lsattr -d {{ backup_transfer_local_base_dir }}
+  register: backup_base_dir_attrs
+  changed_when: false
+  check_mode: false
+
+- name: 백업 Base 디렉터리에 immutable 플래그 없는지 확인
+  ansible.builtin.assert:
+    that:
+      - backup_base_dir_attrs.rc == 0
+      - "'i' not in (backup_base_dir_attrs.stdout.split()[0] | default(''))"
+    fail_msg: >-
+      {{ backup_transfer_local_base_dir }}에 immutable(chattr +i) 속성이
+      감지되었습니다. 이 상태에서는 신규 체인 디렉터리 생성이 EPERM으로
+      실패합니다. 원인을 먼저 확인한 뒤 'chattr -i {{ backup_transfer_local_base_dir }}'
+      로 수동 해제하세요.
+
 - name: 로그 디렉터리 생성
   ansible.builtin.file:
     path: "{{ backup_transfer_log_dir }}"
