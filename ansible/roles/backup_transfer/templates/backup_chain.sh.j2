@@ -57,7 +57,7 @@ state_get() {
 state_set() {
   # state_set chain_dir <value> last_backup_dir <value> last_gtid <value> ...
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
   local current="{}"
   if [ -f "${STATE_FILE}" ]; then
     current=$(cat "${STATE_FILE}")
@@ -202,7 +202,7 @@ if [ "${MODE}" = "full" ]; then
     --socket="${SOCKET}" --target-dir="${BACKUP_DIR}" >> "${LOG_DIR}/mariadb_backup.log" 2>&1
   # Full은 --prepare 하지 않음 (raw 보관 — 복구 시점에 체인 전체 롤포워드)
 else
-  BASEDIR_FULL_PATH="${LOCAL_BASE_DIR}/${LAST_BACKUP_DIR}"
+  BASEDIR_FULL_PATH="${NFS_MOUNT}/${LAST_BACKUP_DIR}"
   mariadb-backup --defaults-extra-file="${CRED_FILE}" --backup \
     --socket="${SOCKET}" --target-dir="${BACKUP_DIR}" \
     --incremental-basedir="${BASEDIR_FULL_PATH}" >> "${LOG_DIR}/mariadb_backup.log" 2>&1

@@ -43,7 +43,7 @@ backup_transfer_role_stabilize_retry_interval_seconds: 300
 # 이슈 #114: 체인 상태(JSON)를 기록 — chain_dir(진행 중인 체인), last_backup_dir(다음
 # Incremental의 --incremental-basedir), last_gtid(변경 없으면 백업 자체 스킵, Full/Incremental 공통)
 # 파일명을 GTID 전용이던 기존(.last_backup_gtid)에서 의미에 맞게 변경
-backup_transfer_state_file: "{{ backup_transfer_local_base_dir }}/.backup_chain_state.json"
+backup_transfer_state_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain_state.json"
 
 # 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
 backup_restore_target_dir: /var/lib/mysql-restore-test
