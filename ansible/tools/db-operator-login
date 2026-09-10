@@ -61,7 +61,7 @@ fi
 
 chmod 600 "$CRED_FILE"
 
-echo "Opening MariaDB session as ${ACCOUNT} via db.seokpan.soldesk.store:3306 ..."
+echo "Opening MariaDB session as ${ACCOUNT} via configured DB endpoint ..."
 
 mariadb \
   --defaults-extra-file="$CRED_FILE" \
