@@ -32,6 +32,8 @@ NFS_MOUNT="{{ backup_transfer_nfs_mount_point }}"
 RETENTION_DAYS={{ backup_transfer_retention_days }}
 LOG_DIR="{{ backup_transfer_log_dir }}"
 STATE_FILE="{{ backup_transfer_state_file }}"
+LOCK_FILE="{{ backup_transfer_lock_file }}"
+LOCK_WAIT_SECONDS={{ backup_transfer_lock_wait_seconds }}
 MAX_RETRIES={{ backup_transfer_role_stabilize_max_retries }}
 RETRY_INTERVAL={{ backup_transfer_role_stabilize_retry_interval_seconds }}
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -114,6 +116,28 @@ done
 
 if [ "${ROLE_CONFIRMED_REPLICA}" != "true" ]; then
   log "최대 대기 시간 동안 계속 Master로 확인됨. 이 서버는 종료합니다."
+  exit 0
+fi
+
+# 1-1. 공유 실행 lock 획득 (이슈 #166 리뷰 반영 — 두 호스트 간 read-modify-write 직렬화)
+#      이 시점부터 마지막 state_set까지 전체 구간을 잠금으로 감싼다. flock은
+#      fd 생명주기에 종속되므로, set -euo pipefail로 인한 모든 조기 종료
+#      경로를 포함해 스크립트가 끝나면 커널이 자동으로 lock을 해제한다 —
+#      별도의 명시적 해제(flock -u) 코드가 필요 없다.
+exec 200>"${LOCK_FILE}"
+if ! flock -w "${LOCK_WAIT_SECONDS}" -x 200; then
+  log "다른 백업 실행이 이미 진행 중으로 판단(lock 획득 실패, ${LOCK_WAIT_SECONDS}초 대기 초과) — 이번 실행은 스킵합니다."
+  exit 0
+fi
+log "공유 lock 획득 완료 — 이후 상태 읽기부터 상태 갱신까지 단일 writer로 진행합니다."
+
+# 1-2. lock 획득 후 역할 재확인 (리뷰 반영)
+#      lock 대기 중에도 추가 failover가 발생했을 가능성을 배제하기 위해
+#      Replica 여부를 한 번 더 확정한다. 여기서 Master로 확인되면 lock을
+#      점유한 채 계속 진행하지 않고 즉시 종료(fd 종료로 lock 자동 해제).
+READ_ONLY_RECHECK=$(mysql_exec "SHOW GLOBAL VARIABLES LIKE 'read_only';" | awk '{print $2}')
+if [ "${READ_ONLY_RECHECK}" != "ON" ]; then
+  log "lock 획득 후 재확인 결과 이 서버는 Master로 전환됨 — 종료합니다."
   exit 0
 fi
 
