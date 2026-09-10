@@ -1,0 +1,9 @@
+---
+- name: Distribute Root CA to Ansible Controller trust store
+  hosts: ansible
+  connection: local
+  become: true
+  gather_facts: false
+
+  roles:
+    - ca_trust
