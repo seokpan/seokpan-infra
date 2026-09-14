@@ -1,0 +1,21 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Service Platform
+# Purpose: Project private endpoint records in CoreDNS
+
+coredns_kubeconfig: "/etc/kubernetes/admin.conf"
+coredns_namespace: "kube-system"
+coredns_configmap_name: "coredns"
+coredns_deployment_name: "coredns"
+
+coredns_managed_begin: "# BEGIN ANSIBLE MANAGED PROJECT ENDPOINTS"
+coredns_managed_end: "# END ANSIBLE MANAGED PROJECT ENDPOINTS"
+coredns_managed_pattern: "(?ms)^[ \\t]*# BEGIN ANSIBLE MANAGED PROJECT ENDPOINTS\\n.*?^[ \\t]*# END ANSIBLE MANAGED PROJECT ENDPOINTS"
+coredns_forward_anchor: "    forward . /etc/resolv.conf {"
+
+coredns_backup_dir: "/var/backups/seokpan/coredns"
+coredns_backup_file: "{{ coredns_backup_dir }}/Corefile.before-project-endpoints"
+
+coredns_validation_image: "busybox:1.36"
+coredns_validation_pod: "seokpan-dns-validate"
+coredns_external_validation_name: "github.com"

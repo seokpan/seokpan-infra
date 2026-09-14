@@ -1,0 +1,21 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-09-01 (분리: 2026-09-09)
+#
+# ca.crt(공개 인증서만)를 cicd Namespace의 ConfigMap으로 배포.
+# bootstrap.yml과 분리한 이유: 테스트 playbook이 bootstrap.yml만 격리
+# 호출할 수 있도록 하여, 운영 클러스터 ConfigMap을 건드리지 않고
+# CA 발급/보정 로직만 실제 코드로 검증하기 위함.
+
+- name: cicd Namespace에 Harbor CA ConfigMap 적용
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: harbor-ca-cert
+        namespace: cicd
+      data:
+        ca.crt: "{{ lookup('file', internal_ca_cert_path) }}"

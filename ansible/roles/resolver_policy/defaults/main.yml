@@ -1,0 +1,16 @@
+---
+# VM 생성 초기에 수동으로 사용했던 Legacy DNS Search Domain.
+# 확인된 값만 제거하며 알 수 없는 제3의 Search Domain은 보존한다.
+resolver_policy_legacy_search_domains:
+  - stone.test
+  - example.com
+
+# VM 생성 초기의 Legacy FQDN Hostname 중
+# DNS Search Domain을 계속 유도하는 것으로 확인된 Host만 명시적으로 정합화한다.
+resolver_policy_legacy_hostnames:
+  ansible:
+    legacy: ansible.example.com
+    desired: ansible
+  nfs:
+    legacy: nfs.example.com
+    desired: nfs

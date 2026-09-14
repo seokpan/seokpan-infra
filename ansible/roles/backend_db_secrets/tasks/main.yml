@@ -1,0 +1,335 @@
+---
+# Owner: 정태훈
+# Scope: Runtime Platform / Kubernetes Secret Bootstrap
+# Project: 石나가는 판단
+# Related: seokpan-infra#150, seokpan-gitops#40, seokpan-gitops#44
+#
+# 원칙:
+# - 기존 identity_svc/game_svc/db_admin 계정·Vault 변수·관리체계를 재사용한다.
+# - 실제 Password와 완성된 DB URL을 Git/Ansible Output에 노출하지 않는다.
+# - Kubernetes API 접근은 Ansible Controller의 cluster_kubeconfig를 사용한다.
+# - 일반 Backend 활성화 또는 Migration 실행은 이 Role의 책임이 아니다.
+
+- name: Backend DB Secret 필수 계약 확인
+  ansible.builtin.assert:
+    that:
+      - cluster_kubeconfig is defined
+      - project_endpoints is defined
+      - project_endpoints.db is defined
+      - project_endpoints.db.fqdn is defined
+      - project_endpoints.db.ports is defined
+      - project_endpoints.db.ports | length > 0
+      - identity_svc_password is defined
+      - game_svc_password is defined
+      - db_admin_password is defined
+    fail_msg: >-
+      Backend DB Secret Bootstrap 필수 계약이 없습니다.
+      cluster_kubeconfig, project_endpoints.db 또는 기존 DB Vault Credential을 확인하세요.
+  no_log: true
+
+- name: 기존 MariaDB Database 계약 로드
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../mariadb_account/defaults/main.yml"
+    name: mariadb_account_contract
+
+- name: Backend DB 비민감 Endpoint 계약 고정
+  ansible.builtin.set_fact:
+    backend_db_host: "{{ project_endpoints.db.fqdn }}"
+    backend_db_port: "{{ project_endpoints.db.ports[0] | int }}"
+    backend_db_database: "{{ mariadb_account_contract.stone_game_db }}"
+    backend_db_driver: "mysql+asyncmy"
+  changed_when: false
+
+- name: DB Endpoint 계약 검증
+  ansible.builtin.assert:
+    that:
+      - backend_db_host == "db.seokpan.soldesk.store"
+      - backend_db_port | int == 3306
+      - backend_db_database == "stone_game"
+      - backend_db_driver == "mysql+asyncmy"
+    fail_msg: "Backend DB Endpoint/Database/Driver 계약이 예상값과 다릅니다."
+
+- name: Synthetic Credential URL component round-trip 검증
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - |
+        from urllib.parse import quote, unquote, urlsplit
+
+        password = "synthetic@:/%#?&+= value"
+        encoded = quote(password, safe="")
+        url = (
+            "mysql+asyncmy://synthetic:"
+            + encoded
+            + "@db.seokpan.soldesk.store:3306/stone_game"
+        )
+
+        parsed = urlsplit(url)
+        userinfo = parsed.netloc.rsplit("@", 1)[0]
+        encoded_password = userinfo.split(":", 1)[1]
+
+        if unquote(encoded_password) != password:
+            raise SystemExit("synthetic URL credential round-trip failed")
+
+        print("ROUND_TRIP_OK")
+  register: backend_db_url_roundtrip
+  changed_when: false
+  check_mode: false
+
+- name: Synthetic Credential round-trip 결과 확인
+  ansible.builtin.assert:
+    that:
+      - backend_db_url_roundtrip.rc == 0
+      - backend_db_url_roundtrip.stdout == "ROUND_TRIP_OK"
+    fail_msg: "DB URL component encode/parse round-trip 검증 실패"
+
+- name: 실제 DB Password URL component 인코딩
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - |
+        import sys
+        from urllib.parse import quote
+
+        print(quote(sys.stdin.read(), safe=""))
+    stdin: "{{ item.password }}"
+    stdin_add_newline: false
+  loop:
+    - account: identity_svc
+      password: "{{ identity_svc_password }}"
+    - account: game_svc
+      password: "{{ game_svc_password }}"
+    - account: db_admin
+      password: "{{ db_admin_password }}"
+  loop_control:
+    label: "{{ item.account }}"
+  register: backend_db_encoded_password_results
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: 인코딩된 DB Password Map 구성
+  ansible.builtin.set_fact:
+    backend_db_encoded_passwords: >-
+      {{
+        backend_db_encoded_passwords | default({})
+        | combine({item.item.account: item.stdout})
+      }}
+  loop: "{{ backend_db_encoded_password_results.results }}"
+  no_log: true
+
+- name: Backend Runtime/Migration DB URL 조립
+  ansible.builtin.set_fact:
+    backend_identity_database_url: >-
+      {{ backend_db_driver }}://identity_svc:{{ backend_db_encoded_passwords.identity_svc }}@{{ backend_db_host }}:{{ backend_db_port }}/{{ backend_db_database }}
+    backend_game_database_url: >-
+      {{ backend_db_driver }}://game_svc:{{ backend_db_encoded_passwords.game_svc }}@{{ backend_db_host }}:{{ backend_db_port }}/{{ backend_db_database }}
+    backend_migration_database_url: >-
+      {{ backend_db_driver }}://db_admin:{{ backend_db_encoded_passwords.db_admin }}@{{ backend_db_host }}:{{ backend_db_port }}/{{ backend_db_database }}
+  no_log: true
+
+- name: 실제 조립 DB URL 계약 검증
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - |
+        import json
+        import sys
+        from urllib.parse import unquote, urlsplit
+
+        expected = json.load(sys.stdin)
+
+        for account, url in expected.items():
+            parsed = urlsplit(url)
+
+            if parsed.scheme != "mysql+asyncmy":
+                raise SystemExit("unexpected driver")
+
+            if parsed.hostname != "db.seokpan.soldesk.store":
+                raise SystemExit("unexpected host")
+
+            if parsed.port != 3306:
+                raise SystemExit("unexpected port")
+
+            if parsed.path != "/stone_game":
+                raise SystemExit("unexpected database")
+
+            userinfo = parsed.netloc.rsplit("@", 1)[0]
+            encoded_user = userinfo.split(":", 1)[0]
+
+            if unquote(encoded_user) != account:
+                raise SystemExit("unexpected account")
+
+        print("URL_CONTRACT_OK")
+    stdin: >-
+      {{
+        {
+          'identity_svc': backend_identity_database_url,
+          'game_svc': backend_game_database_url,
+          'db_admin': backend_migration_database_url
+        } | to_json
+      }}
+    stdin_add_newline: false
+  register: backend_db_url_contract
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: 실제 조립 DB URL 계약 검증 결과 확인
+  ansible.builtin.assert:
+    that:
+      - backend_db_url_contract.rc == 0
+      - backend_db_url_contract.stdout == "URL_CONTRACT_OK"
+    fail_msg: "Backend DB URL Driver/Account/Host/Port/Database 계약 검증 실패"
+  no_log: true
+
+- name: 기존 Backend DB Secret 조회
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: application
+    name: "{{ item }}"
+  loop:
+    - backend-db-runtime
+    - backend-db-migration
+  register: backend_db_existing_secrets
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: 기존 Secret 이름 충돌 여부 확인
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item.resources | length == 0)
+        or
+        (
+          item.resources[0].metadata.labels is defined
+          and
+          item.resources[0].metadata.labels.get('app.kubernetes.io/managed-by', '') == 'ansible'
+          and
+          item.resources[0].metadata.labels.get('seokpan.io/secret-contract', '') == 'backend-db'
+        )
+    fail_msg: >-
+      기존 {{ item.item }} Secret이 Ansible backend-db 계약으로 관리되고 있지 않습니다.
+      기존 Resource 소유권을 확인한 뒤 진행하세요.
+  loop: "{{ backend_db_existing_secrets.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true
+
+- name: backend-db-runtime Secret 생성 또는 갱신
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: backend-db-runtime
+        namespace: application
+        labels:
+          app.kubernetes.io/managed-by: ansible
+          seokpan.io/secret-contract: backend-db
+      stringData:
+        SEOKPAN_IDENTITY_DATABASE_URL: "{{ backend_identity_database_url }}"
+        SEOKPAN_GAME_DATABASE_URL: "{{ backend_game_database_url }}"
+  register: backend_db_runtime_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: backend-db-migration Secret 생성 또는 갱신
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: backend-db-migration
+        namespace: application
+        labels:
+          app.kubernetes.io/managed-by: ansible
+          seokpan.io/secret-contract: backend-db
+      stringData:
+        SEOKPAN_MIGRATION_DATABASE_URL: "{{ backend_migration_database_url }}"
+  register: backend_db_migration_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: 적용 후 Backend DB Secret 구조 조회
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: application
+    name: "{{ item }}"
+  loop:
+    - backend-db-runtime
+    - backend-db-migration
+  register: backend_db_secret_verify
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Runtime Secret 계약 검증
+  ansible.builtin.assert:
+    that:
+      - backend_db_secret_verify.results[0].resources | length == 1
+      - backend_db_secret_verify.results[0].resources[0].type == "Opaque"
+      - >-
+        backend_db_secret_verify.results[0].resources[0].data.keys()
+        | list
+        | sort
+        ==
+        [
+          'SEOKPAN_GAME_DATABASE_URL',
+          'SEOKPAN_IDENTITY_DATABASE_URL'
+        ]
+    fail_msg: "backend-db-runtime Secret Type/Key 계약 불일치"
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Migration Secret 계약 검증
+  ansible.builtin.assert:
+    that:
+      - backend_db_secret_verify.results[1].resources | length == 1
+      - backend_db_secret_verify.results[1].resources[0].type == "Opaque"
+      - >-
+        backend_db_secret_verify.results[1].resources[0].data.keys()
+        | list
+        | sort
+        ==
+        [
+          'SEOKPAN_MIGRATION_DATABASE_URL'
+        ]
+    fail_msg: "backend-db-migration Secret Type/Key 계약 불일치"
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Backend DB Secret 계약 요약
+  ansible.builtin.debug:
+    msg:
+      execution_mode: "{{ 'check' if ansible_check_mode else 'apply' }}"
+      namespace: application
+      runtime_secret:
+        name: backend-db-runtime
+        type: Opaque
+        keys:
+          - SEOKPAN_IDENTITY_DATABASE_URL
+          - SEOKPAN_GAME_DATABASE_URL
+      migration_secret:
+        name: backend-db-migration
+        type: Opaque
+        keys:
+          - SEOKPAN_MIGRATION_DATABASE_URL
+      secret_values_exposed: false

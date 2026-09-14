@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -u
+
+ACCOUNT="${1:-}"
+
+case "$ACCOUNT" in
+  identity_svc|game_svc|db_admin)
+    ;;
+  *)
+    echo "Usage: $0 {identity_svc|game_svc|db_admin}" >&2
+    exit 2
+    ;;
+esac
+
+ANSIBLE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CA_FILE="/etc/pki/ca-trust/source/anchors/seokpan-internal-ca.crt"
+
+if ! command -v mariadb >/dev/null 2>&1; then
+  echo "ERROR: mariadb client not found." >&2
+  exit 1
+fi
+
+if [[ ! -r "$CA_FILE" ]]; then
+  echo "ERROR: Seokpan Internal CA trust anchor is not readable: $CA_FILE" >&2
+  echo "Run playbooks/controller_ca_trust.yml first." >&2
+  exit 1
+fi
+
+umask 077
+CRED_FILE="$(mktemp /tmp/seokpan-db-operator.XXXXXX.cnf)" || exit 1
+
+cleanup() {
+  rm -f -- "$CRED_FILE"
+}
+
+on_signal() {
+  local rc="$1"
+  trap - HUP INT TERM
+  cleanup
+  exit "$rc"
+}
+
+trap cleanup EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+cd "$ANSIBLE_ROOT" || exit 1
+
+ansible-playbook \
+  playbooks/db_operator_login.yml \
+  -e "db_operator_account=$ACCOUNT" \
+  -e "db_operator_credentials_file=$CRED_FILE" \
+  --ask-vault-pass
+
+rc=$?
+if [[ $rc -ne 0 ]]; then
+  echo "ERROR: Failed to prepare DB Operator credentials." >&2
+  exit "$rc"
+fi
+
+chmod 600 "$CRED_FILE"
+
+echo "Opening MariaDB session as ${ACCOUNT} via configured DB endpoint ..."
+
+mariadb \
+  --defaults-extra-file="$CRED_FILE" \
+  --ssl-ca="$CA_FILE" \
+  --ssl-verify-server-cert
+
+rc=$?
+exit "$rc"

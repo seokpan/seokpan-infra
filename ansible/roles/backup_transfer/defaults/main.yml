@@ -1,0 +1,153 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: backup_transfer role default variables (이슈 #55, #114 Full+Incremental 체이닝,
+#          이슈 #119 DR 운영 재개 반자동화 반영)
+
+mariadb_master_delegate_host: maxscale-01
+stone_game_db: stone_game
+mariadb_socket_path: /var/lib/mysql/mysql.sock
+
+backup_transfer_local_base_dir: /srv/nfs/db-backup
+
+# NFS 서버 실제 Export 설정 그대로 반영
+# (192.168.0.0/16, rw,sync,no_subtree_check,no_root_squash — nfs_server role defaults와 동일 대상)
+backup_transfer_nfs_export_host: 192.168.54.50
+backup_transfer_nfs_export_path: /srv/nfs/db-backup
+backup_transfer_nfs_mount_point: /mnt/nfs-db-backup
+
+backup_transfer_retention_days: 7
+
+# 이슈 #114: Full/Incremental 각각의 cron 스케줄로 분리
+# (기존 단일 backup_transfer_cron_hour/minute 는 제거 — schedule.yml에서 두 cron으로 대체)
+backup_transfer_full_cron_weekday: "3"     # 3 = 수요일 (cron weekday 표기)
+backup_transfer_full_cron_hour: "14"
+backup_transfer_full_cron_minute: "0"
+
+backup_transfer_incr_cron_weekday: "1,2,4,5"   # 월, 화, 목, 금
+backup_transfer_incr_cron_hour: "2"
+backup_transfer_incr_cron_minute: "0"
+
+backup_transfer_log_dir: /var/log/seokpan
+backup_transfer_credentials_file: /root/.backup_svc.cnf
+
+# 이슈 #114: Full+Incremental 체이닝 백업 스크립트
+backup_transfer_chain_script_path: /usr/local/sbin/seokpan_mariadb_backup_chain.sh
+
+# failover 전환 도중 read_only 상태가 일시적으로 불안정할 수 있어
+# 즉시 skip하지 않고 일정 간격으로 재확인 (최대 30분 대기 후 포기)
+backup_transfer_role_stabilize_max_retries: 6
+backup_transfer_role_stabilize_retry_interval_seconds: 300
+
+# 이슈 #114: 체인 상태(JSON)를 기록 — chain_dir(진행 중인 체인), last_backup_dir(다음
+# Incremental의 --incremental-basedir), last_gtid(변경 없으면 백업 자체 스킵, Full/Incremental 공통)
+# 파일명을 GTID 전용이던 기존(.last_backup_gtid)에서 의미에 맞게 변경
+backup_transfer_state_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain_state.json"
+
+# 이슈 #166 리뷰 반영: 두 DB 호스트 간 백업 실행/상태 갱신을 직렬화하는 공유 lock.
+# state_file과 동일한 NFS 디렉터리 사용 (prepare.yml에서 이미 0700으로 생성됨,
+# 별도 디렉터리 생성 태스크 불필요)
+backup_transfer_lock_file: "{{ backup_transfer_nfs_mount_point }}/.state/.backup_chain.lock"
+# lock은 non-blocking(flock -n)으로만 시도한다 — 대기 시간 개념 자체가 없음.
+# 이유(2차 리뷰 반영): -w(대기) 방식은 겹쳤을 때 "먼저 쓰던 쪽이 빨리 끝나면
+# 뒤쪽도 순서대로 진입"할 수 있어, "겹치면 무조건 이번 사이클은 넘긴다"는
+# 정책이 코드로 보장되지 않았다. -n은 겹친 게 확인되는 즉시 무조건 포기시켜
+# 이 정책을 명확히 한다. 스킵된 실행은 재시도되지 않고 다음 정기 cron
+# 트리거(Incremental: 다음 날, Full: 다음 주 수요일)를 기다린다 — 이는
+# 기존 GTID 미변경 스킵과 동일한 RPO 성겨짐 모델을 따른다(스크립트 헤더 참고).
+
+# 복구(Restore) 관련 기본값 — 실제 대상 백업 경로는 사람이 extra-vars로 지정
+backup_restore_target_dir: /var/lib/mysql-restore-test
+backup_restore_socket: /var/lib/mysql-restore-test/mariadb-restore.sock
+backup_restore_port: 3307
+  # PR #117 리뷰 반영으로 --skip-networking 적용, 현재 이 변수는 사용되지 않음 (향후 TCP 필요 시 대비해 유지)
+
+# 이슈 #114: 체인(Full+Incremental) 복구 전용 변수
+backup_restore_chain_dir: ""   # 예: chain_20260907_020000 (extra-vars 필수, mariadb_restore_chain.yml 실행 시 지정)
+backup_restore_chain_working_dir: /var/lib/mysql-restore-chain-working
+
+backup_restore_validation_tables:
+  - member
+  - member_stats
+  - game
+  - game_participant
+  - move
+  - game_result
+  - rating_history
+# FK 무결성 검증용 — stone_game_schema_v1.sql 기준 실제 FK 관계
+backup_restore_fk_checks:
+  - { table: member_stats, column: member_id, ref_table: member, ref_column: member_id }
+  - { table: game_participant, column: game_id, ref_table: game, ref_column: game_id }
+  - { table: game_participant, column: member_id, ref_table: member, ref_column: member_id }
+  - { table: move, column: game_id, ref_table: game, ref_column: game_id }
+  - { table: game_result, column: game_id, ref_table: game, ref_column: game_id }
+  - { table: rating_history, column: member_id, ref_table: member, ref_column: member_id }
+  - { table: rating_history, column: game_id, ref_table: game, ref_column: game_id }
+
+# ────────────────────────────────────────────────────────────────
+# 이슈 #119: DR 복구본 운영 재개 반자동화
+# ────────────────────────────────────────────────────────────────
+
+# [4] backup_restore_mode: isolated(기존, 기본값) | production(신규)
+#     - isolated: 기존 #55/#114 동작 그대로(격리 검증용, 변경 없음)
+#     - production: 실제 운영 datadir(mariadb_datadir)로 복구, 정식 mariadb 서비스 기동
+#     반드시 extra-vars로 명시 지정(-e backup_restore_mode=production) — 기본값이
+#     운영에 잘못 적용되는 사고를 막기 위해 기본은 항상 isolated로 고정.
+backup_restore_mode: isolated
+
+# 실제 운영 datadir/서비스명 (RHEL 계열 MariaDB 공식 repo 패키지 기준 기본값,
+# mariadb role의 handlers/main.yml "restart mariadb"와 동일 서비스를 가리킴)
+mariadb_datadir: /var/lib/mysql
+mariadb_service_name: mariadb
+
+# PR #133 2차 리뷰 반영, 이슈 #119 코멘트로 결정 기록·전환 완료(2026-09-04):
+# 기존 운영 datadir 보존 여부. 원래는 F-5(실 서비스 오픈 전 정리) 완료 이후로
+# 전환할 계획이었으나, 그 시점을 기다릴 이유가 없다고 판단 — 현재 누적된
+# 백업/테스트 데이터는 보존 가치가 없어 F-5 절차를 앞당겨 직접 삭제하고, 코드
+# 기본값은 지금 바로 true로 전환. 이슈 #119 원본 계약(항상 .corrupted.<timestamp>
+# 보존)과 이제 일치하며, 이후 전환 누락 리스크 자체가 사라짐. 실측 완료(#119 코멘트).
+backup_restore_preserve_corrupted_datadir: true
+
+# 이슈 #119, PR #133 리뷰 반영: MariaDB-Monitor failover 강제 트리거용 모니터명
+# (maxscale.cnf 기준, detect_master.yml 출력의 마지막 컬럼과 동일)
+mariadb_monitor_name: MariaDB-Monitor
+
+# [5] 복제 재구성(replication_setup.yml)
+# backup_restore_role: master|replica — extra-vars 필수 지정, 기본값 없음(실수 방지)
+backup_restore_role: ""
+# Master 접속 정보 — 우선 detect_master.yml(maxctrl list servers)로 자동 판별을 시도하고,
+# 판별 실패(양쪽 다 유실된 최악의 시나리오)한 경우에만 사람이 아래 값을 extra-vars로 지정해야 함.
+# 평소에는 빈 값 유지(자동 판별 우선 원칙).
+backup_restore_master_host: ""
+backup_restore_master_port: 3306
+
+# [7] service_checklist.yml — Common VIP 경유 R/W 헬스체크(임시 테이블 방식)
+# E_infra_snapshot.md 1절 기준 Common VIP. 이슈 #102는 PR #137로 closed —
+# MaxScale Read-Write-Listener는 TLS 전용이므로 --skip-ssl 워크어라운드(TS-018
+# 이전 상태)는 더 이상 유효하지 않다. ca_trust role이 배포한 시스템 신뢰 CA로
+# --ssl-ca 검증까지 통과시킨다(TS-018 검증 방식과 동일).
+common_vip_host: 10.1.93.90
+common_vip_port: 3306
+dr_healthcheck_credentials_file: /root/.dr_healthcheck_svc.cnf
+
+# ca_trust role이 배포하는 시스템 신뢰 CA 경로와 동일 값을 유지 (ca_trust role
+# 자체를 의존성으로 걸지 않기 위해, internal_ca/ca_trust 두 role이 서로 값을
+# 중복 정의해온 기존 관례와 동일하게 이 role에서도 하드코딩 유지)
+dr_healthcheck_ssl_ca_path: /etc/pki/ca-trust/source/anchors/seokpan-internal-ca.crt
+
+# PR #133 리뷰 반영(2026-09-04): Split-brain 방지 임시 안전장치 파일 경로.
+# role=master로 새 Master가 확립되면 같은 mariadbs 그룹의 나머지 호스트에 이 파일을
+# 미리 배치해, 그 호스트가 나중에 복제 설정 없이 그냥 기동되어도 read_only=1로
+# 부팅되도록 강제(고립 Master로 오판정되는 것 방지). zz- 접두사로 파일명을 지정해
+# custom.cnf(이슈 #50)보다 항상 나중에 읽히도록 함. role=replica로 정상 재편입되면
+# replication_setup.yml이 자동으로 제거함.
+dr_failsafe_read_only_cnf_path: /etc/my.cnf.d/zz-dr-failsafe-read-only.cnf
+# PR #133 3차 리뷰 반영(2026-09-04): Split-brain 방지 안전장치 배치 시, 도달
+# 불가(unreachable) 호스트를 자동으로 안전하다고 간주하지 않기 위한 명시적
+# 확인 목록. unreachable은 서버가 실제로 꺼져 있다는 보장이 아니므로(일시적
+# SSH/네트워크 장애일 수 있음), 사람이 직접 확인·fencing한 호스트 이름만
+# 여기 나열해야 해당 호스트에 한해 [6] Gate를 통과한다. 평소에는 빈 배열 유지 —
+# 실행할 때마다 extra-vars로 그때그때 확인한 호스트만 넘길 것(기본값에
+# 상시 등록하지 말 것).
+backup_restore_fenced_hosts: []

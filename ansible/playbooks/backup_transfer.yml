@@ -1,0 +1,13 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: MariaDB Full 백업/NFS 전송/Retention/cron 스케줄 코드화 (이슈 #55)
+
+- name: MariaDB Backup 자동화 배포
+  hosts: mariadbs
+  become: true
+  gather_facts: true
+
+  roles:
+    - backup_transfer

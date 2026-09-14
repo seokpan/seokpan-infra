@@ -1,0 +1,42 @@
+---
+- name: Prepare DB Operator credential file
+  hosts: ansible
+  connection: local
+  gather_facts: false
+
+  vars:
+    db_operator_allowed_accounts:
+      identity_svc: "{{ identity_svc_password }}"
+      game_svc: "{{ game_svc_password }}"
+      db_admin: "{{ db_admin_password }}"
+
+  tasks:
+    - name: Load existing MariaDB database contract
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/mariadb_account/defaults/main.yml"
+        name: mariadb_account_contract
+
+    - name: Validate DB Operator account
+      ansible.builtin.assert:
+        that:
+          - db_operator_account is defined
+          - db_operator_account in db_operator_allowed_accounts
+          - db_operator_credentials_file is defined
+          - db_operator_credentials_file | length > 0
+        fail_msg: >-
+          db_operator_account는 identity_svc, game_svc, db_admin 중 하나여야 하며
+          db_operator_credentials_file이 지정되어야 합니다.
+
+    - name: Write temporary MariaDB client credential file
+      ansible.builtin.copy:
+        content: |
+          [client]
+          user={{ db_operator_account }}
+          password="{{ db_operator_allowed_accounts[db_operator_account] | replace('\\', '\\\\') | replace('"', '\\"') }}"
+          host={{ project_endpoints.db.fqdn }}
+          port={{ project_endpoints.db.ports[0] | int }}
+          database={{ mariadb_account_contract.stone_game_db }}
+          protocol=TCP
+        dest: "{{ db_operator_credentials_file }}"
+        mode: "0600"
+      no_log: true

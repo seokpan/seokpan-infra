@@ -1,0 +1,207 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-09-08
+#
+# [위치] roles/harbor/tasks/ 안에 robot_account_api.yml로 추가,
+# main.yml에서 include_tasks로 연결 (harbor_project.yml 이후, 기존 robot_account.yml과
+# 나란히 위치 권장. 서로 독립적인 계정이라 순서 자체는 무관).
+#
+# [범위] seokpan-app Issue #58(main Image Pipeline) 선행 조건 - Guard/Promote/Cleanup/
+# Verify Stage가 Harbor REST API를 호출하기 위한 전용 Robot Account.
+# 기존 robot$seokpan+seokpan-ci(robot_account.yml, Push/Pull 전용)와 완전히 분리된 계정이며,
+# 이 Task는 그 계정을 절대 조회/생성/수정하지 않는다.
+#
+# [권한 범위 확정] Harbor UI로 수동 생성 후 GET /api/v2.0/robots?q=Level=project,ProjectID=<id>
+# 응답으로 실제 payload 구조를 확인하고 그대로 반영함(2026-09-08 확인):
+#   permissions[].access = [
+#     {resource: artifact, action: list}, {resource: artifact, action: read},
+#     {resource: tag, action: create}, {resource: tag, action: delete}, {resource: tag, action: list}
+#   ]
+#
+# [멱등성 주의 - 매우 중요, 기존 robot_account.yml에서 실제로 겪은 API 함정]
+# GET /api/v2.0/robots를 필터 없이 호출하면 project-level Robot Account는 조회 결과에
+# 잡히지 않는다(X-Total-Count: 0으로 응답, 실제로 계정이 있어도 빈 배열). 반드시
+# q=Level=project,ProjectID=<project_id> 필터를 함께 넘겨야 project-level 계정이 조회된다.
+# (project_id 없이 Level=project만 넘기면 400 Bad Request: "must with project ID when to
+# query project robots".) 이 필터 없이 기존 존재 여부를 판단하면 항상 "존재하지 않음"으로
+# 오판하게 되므로 반드시 이 순서를 지킬 것.
+#
+# Robot Secret은 생성 시점에 딱 한 번만 응답에 포함되고 이후 조회로는 다시 얻을 수 없다.
+# 그래서 이 Task는:
+#   1) Project ID 조회 (harbor_project_name 기준)
+#   2) q=Level=project,ProjectID=<id> 필터로 동일 이름의 Robot Account가 이미 있는지 조회
+#   3) 있으면 생성을 건너뛰고 "이미 존재함, Secret은 Vault에 이미 있어야 함" 안내만 출력
+#   4) 없으면 새로 생성하고, Secret을 예측 불가능한 경로의 임시 파일(0600)에 기록한 뒤
+#      사람이 Vault에 등록을 마칠 때까지 대기했다가 자동으로 삭제 (하단 09/09 수정 이력 참고,
+#      Secret 값 자체는 no_log: true로 stdout/Ansible 로그에 노출하지 않음)
+#
+# [선행 조건] harbor_project.yml이 먼저 실행되어 Project가 존재해야 함.
+
+- name: Harbor Project ID 조회 (API Robot Account용)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name }}"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: _harbor_api_robot_project_lookup
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Harbor Project ID 확정 (API Robot Account용)
+  ansible.builtin.set_fact:
+    _harbor_api_robot_project_id: >-
+      {{ (_harbor_api_robot_project_lookup.json
+          | selectattr('name', 'equalto', harbor_project_name)
+          | map(attribute='project_id')
+          | first) }}
+
+- name: Harbor Project ID 검증 (API Robot Account용)
+  ansible.builtin.assert:
+    that:
+      - _harbor_api_robot_project_id is defined
+      - (_harbor_api_robot_project_id | string | length) > 0
+    fail_msg: >-
+      Harbor Project '{{ harbor_project_name }}'의 project_id를 확인할 수 없습니다.
+      harbor_project.yml이 먼저 실행되었는지 확인하세요.
+
+- name: Harbor Robot Account 목록 조회 (project-scope 필터 필수)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/robots?q=Level%3Dproject%2CProjectID%3D{{ _harbor_api_robot_project_id }}&page_size=100"
+    method: GET
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: _harbor_existing_api_robots
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: 기존 API Robot Account 존재 여부 확인 (전체 이름 정확히 일치)
+  ansible.builtin.set_fact:
+    _harbor_api_robot_exists: >-
+      {{ _harbor_existing_api_robots.json
+         | selectattr('name', 'equalto', 'robot$' + harbor_project_name + '+' + harbor_api_robot_name)
+         | list | length > 0 }}
+
+- name: API Robot Account가 이미 존재하면 재생성하지 않고 안내만 출력
+  ansible.builtin.debug:
+    msg: >-
+      Robot Account 'robot${{ harbor_project_name }}+{{ harbor_api_robot_name }}'가 이미
+      존재합니다. Secret은 최초 생성 시에만 노출되므로, group_vars/all/vault.yml에
+      vault_harbor_api_robot_secret 값이 이미 등록되어 있는지 확인하세요.
+      (없다면 Harbor UI에서 기존 Robot을 삭제하고 이 Task를 재실행해야 새 Secret을 받을 수 있습니다.)
+  when: _harbor_api_robot_exists
+
+- name: API Robot Account 생성 (Artifact List/Read, Tag List/Create/Delete)
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/robots"
+    method: POST
+    user: admin
+    password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    body:
+      name: "{{ harbor_api_robot_name }}"
+      duration: -1   # 만료 없음. 순환(rotation) 정책은 별도 결정 필요 - 지금은 임의로 정하지 않음
+      description: >-
+        main Image Pipeline(#58)에서 Harbor REST API 호출(Artifact 조회, Tag 생성/삭제) 전용 계정.
+        BuildKit Push/Pull 용도는 robot$seokpan+seokpan-ci를 사용하며 이 계정은 관여하지 않음.
+        권한: Artifact(List/Read), Tag(List/Create/Delete)
+      level: project
+      permissions:
+        - kind: project
+          namespace: "{{ harbor_project_name }}"
+          access:
+            - resource: artifact
+              action: list
+            - resource: artifact
+              action: read
+            - resource: tag
+              action: create
+            - resource: tag
+              action: delete
+            - resource: tag
+              action: list
+    status_code: [201, 409]
+  register: _harbor_new_api_robot
+  when: not _harbor_api_robot_exists
+  no_log: true   # 응답 body에 1회성 secret이 포함되므로 로그/Evidence에 절대 남기지 않음
+
+# [보안 수정, 09/09 - PR 리뷰 2차 반영]
+# 1차 수정(debug 메시지에 Secret 직접 출력 제거)만으로는 부족했다. 고정 경로
+# (/tmp/harbor_api_robot_secret.txt)에 평문 파일을 남기고 사람이 수동으로
+# shred/rm 하도록 한 절차는, 정상 종료·중단·세션 이탈·운영자 실수 시 평문
+# Secret 파일이 Controller에 장시간 잔존할 수 있는 구조였다(#158의 "Secret은
+# Vault에만 저장하고 로그/저장소에 평문을 남기지 않는다" 원칙과 충돌).
+#
+# 그래서 파일 lifecycle을 Ansible이 직접 보장하도록 아래처럼 변경한다:
+#   1) ansible.builtin.tempfile로 예측 불가능한 경로에 0600 권한으로 생성
+#      (고정 경로 대신 무작위 경로 - 다른 프로세스/사용자가 경로를 추측해
+#      접근하는 것을 방지)
+#   2) block/always로 감싸서, 아래 순서가 정상 종료되든 중간에 실패하든
+#      always에서 반드시 파일 삭제를 시도한다.
+#   3) 단, 삭제가 사람이 파일 내용을 실제로 사용하기 전에 일어나면 안 되므로
+#      (Ansible은 동기 실행이라 debug 직후 always가 바로 실행되어 버림),
+#      ansible.builtin.pause로 "Vault 등록을 마치고 Enter를 눌러야 다음 단계
+#      (=파일 삭제)로 진행"되도록 명시적 확인 지점을 둔다.
+#   4) Ctrl-C 등 이례적 중단 시에도 Ansible이 always 블록 실행을 시도하지만,
+#      프로세스가 강제 종료(kill -9)되는 경우까지는 보장할 수 없다 - 이 경우
+#      운영자가 수동으로 파일이 남아있는지 확인 후 삭제해야 한다(잔존 가능성은
+#      남아 있으나, 정상적인 흐름에서는 항상 자동 정리됨).
+# Secret 값 자체는 여전히 no_log: true로 stdout/로그에 노출하지 않는다.
+- name: 신규 API Robot Secret 처리 (임시 파일 생성 → Vault 등록 대기 → 자동 정리)
+  when: not _harbor_api_robot_exists and _harbor_new_api_robot.json.secret is defined
+  block:
+    - name: 예측 불가능한 임시 파일 경로 생성 (0600)
+      ansible.builtin.tempfile:
+        state: file
+        suffix: "_harbor_api_robot_secret"
+      register: _harbor_api_robot_secret_tempfile
+      delegate_to: localhost
+      become: false
+
+    - name: API Robot Secret을 임시 파일에 기록 (stdout에는 노출하지 않음)
+      ansible.builtin.copy:
+        content: "{{ _harbor_new_api_robot.json.secret }}"
+        dest: "{{ _harbor_api_robot_secret_tempfile.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: API Robot Secret 처리 안내 (파일 경로만 출력, Secret 값 자체는 미노출)
+      ansible.builtin.debug:
+        msg: >-
+          Robot Account 생성 완료. Secret 값은 stdout에 출력하지 않았습니다.
+          Ansible Controller의 {{ _harbor_api_robot_secret_tempfile.path }} 파일을 지금
+          다른 터미널에서 열어 확인하고, 'ansible-vault encrypt_string
+          --vault-password-file <경로> "$(cat {{ _harbor_api_robot_secret_tempfile.path }})"
+          --name vault_harbor_api_robot_secret' 명령으로 암호화해서
+          group_vars/all/vault.yml에 추가하세요.
+          Robot Name: robot${{ harbor_project_name }}+{{ harbor_api_robot_name }}
+          이 값은 Harbor에서 다시 조회할 수 없습니다. Vault 등록을 마쳤으면 아래
+          Enter 입력 시 이 임시 파일이 자동으로 삭제됩니다.
+
+    - name: Vault 등록 완료 대기 (Enter 입력 시 다음 단계=파일 삭제로 진행)
+      ansible.builtin.pause:
+        prompt: >-
+          위 Secret을 group_vars/all/vault.yml에 암호화 등록했으면 Enter를 누르세요.
+          계속하면 임시 파일이 즉시 삭제됩니다
+      delegate_to: localhost
+      become: false
+  always:
+    - name: 임시 Secret 파일 정리 (성공/실패 무관 항상 삭제 시도)
+      ansible.builtin.file:
+        path: "{{ _harbor_api_robot_secret_tempfile.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: >-
+        _harbor_api_robot_secret_tempfile is defined
+        and _harbor_api_robot_secret_tempfile.path is defined

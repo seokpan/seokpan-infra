@@ -1,0 +1,22 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: backup_transfer role entrypoint (이슈 #55)
+#          - mariadbs 그룹 전체에 동일 배포. 실제 Master는 cron 스크립트가 매 실행 시 자체 판별
+#            (Ansible 적용 시점의 detect_master가 아니라 실행 시점 판별이 필요하므로)
+
+- name: python3-PyMySQL 설치 확인 (ansible.mariadb 모듈 요구사항)
+  ansible.builtin.dnf:
+    name: python3-PyMySQL
+    state: present
+
+- name: mariadb-backup 바이너리 존재 확인
+  ansible.builtin.command: command -v mariadb-backup
+  changed_when: false
+
+- name: 백업 스크립트/인증/디렉터리 준비
+  ansible.builtin.import_tasks: prepare.yml
+
+- name: cron 스케줄 등록 (Ansible + cron 방식 확정 — 이슈 #55 코멘트)
+  ansible.builtin.import_tasks: schedule.yml

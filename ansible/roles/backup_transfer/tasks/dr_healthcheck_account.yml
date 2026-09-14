@@ -1,0 +1,41 @@
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단
+# Purpose: [7] 서비스 체크리스트의 VIP 경유 R/W 헬스체크 전용 계정 준비 (이슈 #119)
+#          - 영구 테이블을 신설하지 않기 위해 CREATE TEMPORARY TABLES 권한만 부여.
+#            임시 테이블은 세션(커넥션) 종료 시 자동 삭제되며 Alembic이 관리하는
+#            영구 스키마 카탈로그와 전혀 무관함 (팀 정책: 테이블 생성/변경은 Alembic이
+#            유일한 기준 — 이슈 #89 코멘트, 정태훈. 이 계정은 그 정책과 충돌하지 않음.
+#            단, 신규 계정 신설 사실은 팀장 보고 대상 — 변경될 수 있음)
+#          - 항상 실제 Master에서만 실행 (Replica 직접 조작 시 고아 상태 위험)
+
+- name: dr_healthcheck_svc 계정 생성 (CREATE TEMPORARY TABLES 권한만 — 영구 테이블 생성 권한 없음)
+  # delegate_to 사용 이유: 이 태스크를 호출하는 playbook은 -l 옵션으로 단일 호스트
+  # (복구 대상)만 Play에 포함시키는 경우가 대부분(예: -l mariadb-02). 과거 patterns
+  # (mariadb_account/mariadb_database role)처럼 when: inventory_hostname ==
+  # mariadb_master_inventory_hostname 을 쓰면, Play에 Master가 아예 포함되지 않은
+  # 경우 어느 호스트에서도 이 태스크가 실행되지 않고 조용히 스킵된다(실측 확인,
+  # 2026-09-04 — 계정 미생성으로 VIP 헬스체크가 Access denied로 실패했었음).
+  # delegate_to는 Play 대상과 무관하게 항상 실제 Master에서 실행되므로 안전하다.
+  ansible.mariadb.mariadb_user:
+    name: dr_healthcheck_svc
+    host: '%'
+    password: "{{ dr_healthcheck_svc_password }}"
+    update_password: on_create
+    priv: "{{ stone_game_db }}.*:CREATE TEMPORARY TABLES"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+  delegate_to: "{{ mariadb_master_inventory_hostname }}"
+  run_once: true
+  no_log: true
+
+- name: 권한 즉시 반영
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket_path }}"
+    query: "FLUSH PRIVILEGES"
+  delegate_to: "{{ mariadb_master_inventory_hostname }}"
+  run_once: true
+  changed_when: false

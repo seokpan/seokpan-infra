@@ -1,44 +1,229 @@
 # 작성자: 최유준
-# 작성 날짜: 2026-08-28
+# 작성 날짜: 2026-09-02
+# (2026-09-08 수정: harbor-api-credential Secret 추가 - seokpan-app Issue #58
+#  main Image Pipeline의 Harbor REST API 전용 Robot Account용)
 #
-# [위치] harbor role이 아니라 별도 위치 권장 — Harbor는 VM 대상 role이고 이 Task는
-# Kubernetes Cluster 대상이라 성격이 다름. stage 70-platform.yml에서, Jenkins 네임스페이스가
-# 이미 존재하는 시점(Argo CD가 apps/root 통해 jenkins 네임스페이스 Sync한 이후) 이후에 실행.
+# [위치] harbor role이 아니라 별도 위치 — Harbor는 VM 대상 role이고 이 Task는
+# Kubernetes Cluster 대상이라 성격이 다름. stage 70-platform.yml에서, cicd Namespace가
+# 이미 존재하는 시점(Root Application이 platform/namespaces-rbac 통해 공용 5종 Namespace를
+# Sync한 이후) 이후에 실행.
 #
 # [원칙, 06 문서 4.1] "Kubernetes Secret의 실제 값은 Ansible이 최초 주입하거나 승인된 Secret
 # 전달 절차가 주입하며, Argo CD는 Secret 참조만 관리한다." — 그래서 이 Secret들은
-# seokpan-gitops repo에 커밋하지 않고, Ansible이 kubectl로 클러스터에 직접 적용합니다.
+# seokpan-gitops repo에 커밋하지 않고, Ansible이 kubernetes.core.k8s로 클러스터에 직접 적용합니다.
 # Jenkins Deployment/JCasC(Git에 있음)는 이 Secret의 "이름"만 참조합니다.
 #
-# [kubectl 사용 이유] kubernetes.core 사용은 팀 requirements.yml/txt 확정 전까지 보류 원칙
-# (argocd_bootstrap role과 동일한 판단 기준 적용) — command 모듈로 kubectl 직접 호출.
+# [수정 이력, 09/02] PR #98 리뷰 반영: cp-03 고정 + shell kubectl 방식을
+# Ansible Controller + kubernetes.core.k8s(공용 cluster_kubeconfig, argocd_bootstrap과 동일 패턴)
+# 방식으로 전환. 부수적으로 shell 이중 렌더링으로 인해 harbor_robot_name의 리터럴 "$" 문자가
+# bash 변수로 오인식되던 버그도 함께 해소됨.
 #
-# [주의, 08/28] harbor_hostname / harbor_robot_name은 group_vars/harbor/vars.yml에 정의되어
-# harbor 그룹(호스트) 대상 Play에서만 자동으로 보입니다. 이 Task는 K8s 대상 Play에서 실행되므로
-# hostvars['harbor'].변수명 형태로 명시적으로 끌어옵니다 (인벤토리 상의 실제 호스트/그룹명이
-# "harbor"가 맞는지 확인 필요 — 다르면 아래 hostvars['harbor'] 부분을 실제 이름으로 교체).
+# [수정 이력, 09/02 추가] Harbor Robot Account username에 Project 접두사(harbor_project_name)가
+# 누락되어 있던 기존 결함 발견 및 수정. 올바른 형식은 "robot$<project>+<robot_name>"이며
+# (예: robot$seokpan+seokpan-ci), harbor_robot_name 단독으로는 존재하지 않는 계정명이 되어
+# BuildKit → Harbor 인증이 실패하는 문제였음. group_vars/registry/vars.yml에 이미 정의된
+# harbor_project_name / harbor_robot_name을 조합하도록 수정. 실제 클러스터에서 changed=2(1차)
+# → changed=0(재실행) 및 harbor-robot-dockerconfig username 값으로 최종 검증 완료.
 #
-# [멱등성] kubectl 재실행 시 동일 값으로 덮어써도 안전하도록 `kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -` 패턴 사용.
+# [수정 이력, 09/08 추가] harbor-api-credential Secret 신규 추가. seokpan-app Issue #58
+# (main Image Pipeline)의 Guard/Promote/Cleanup/Verify Stage가 Harbor REST API(Artifact
+# 조회, Tag 생성/삭제)를 호출하기 위한 전용 Robot Account(robot$seokpan+seokpan-api,
+# harbor role의 robot_account_api.yml에서 생성)의 Credential이다. 기존
+# harbor-robot-dockerconfig/jenkins-harbor-credential(BuildKit Push/Pull 전용 seokpan-ci
+# 계정)과는 완전히 별개 계정이며, 이 Secret은 절대 그 계정의 Credential을 참조하지 않는다.
+# jenkins-harbor-credential과 동일하게 Opaque + stringData(username/password) 형태로 두어,
+# Jenkinsfile의 container('python')에서 Jenkins Credential Binding(usernamePassword)으로
+# 바인딩해 urllib 기반 Harbor API 호출에 사용한다.
+
+- name: 필수 Vault 변수 정의 여부 확인
+  ansible.builtin.assert:
+    that:
+      - vault_harbor_robot_secret is defined
+      - vault_harbor_api_robot_secret is defined
+      - vault_jenkins_admin_username is defined
+      - vault_jenkins_admin_password is defined
+    fail_msg: "필수 vault 변수가 정의되지 않았습니다. group_vars/all/vault.yml 확인 필요"
+  delegate_to: localhost
+  become: false
+
+- name: jenkins-admin Secret 적용 (Jenkins Controller 최초 관리자 계정)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-admin
+        namespace: cicd
+      stringData:
+        username: "{{ vault_jenkins_admin_username }}"
+        password: "{{ vault_jenkins_admin_password }}"
+  register: jenkins_admin_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
 
 - name: harbor-robot-dockerconfig Secret 적용 (BuildKit rootless Agent Pod가 마운트)
-  ansible.builtin.shell: |
-    kubectl create secret docker-registry harbor-robot-dockerconfig \
-      --namespace=cicd \
-      --docker-server={{ hostvars['harbor'].harbor_hostname }} \
-      --docker-username="robot${{ hostvars['harbor'].harbor_robot_name }}" \
-      --docker-password="{{ vault_harbor_robot_secret }}" \
-      --dry-run=client -o yaml | kubectl apply -f -
-  no_log: true   # 커맨드 라인 자체에 password가 노출되므로 로그에 남기지 않음
-  changed_when: true   # dry-run+apply 조합은 changed_when 판단이 애매해서 항상 changed로 표시,
-                        # 정밀한 idempotency 보고가 필요하면 이후 diff 기반으로 개선 가능
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: harbor-robot-dockerconfig
+        namespace: cicd
+      data:
+        config.json: >-
+          {{
+            {
+              'auths': {
+                hostvars['harbor'].harbor_hostname: {
+                  'username': 'robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name,
+                  'password': vault_harbor_robot_secret,
+                  'auth': (('robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name ~ ':' ~ vault_harbor_robot_secret) | b64encode)
+                }
+              }
+            } | to_json | b64encode
+          }}
+  register: harbor_dockerconfig_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
 
 - name: jenkins-harbor-credential Secret 적용 (JCasC 환경변수 치환용, Jenkins Credential Store 바인딩)
-  ansible.builtin.shell: |
-    kubectl create secret generic jenkins-harbor-credential \
-      --namespace=cicd \
-      --from-literal=username="robot${{ hostvars['harbor'].harbor_robot_name }}" \
-      --from-literal=password="{{ vault_harbor_robot_secret }}" \
-      --dry-run=client -o yaml | kubectl apply -f -
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-harbor-credential
+        namespace: cicd
+      stringData:
+        username: "robot${{ hostvars['harbor'].harbor_project_name }}+{{ hostvars['harbor'].harbor_robot_name }}"
+        password: "{{ vault_harbor_robot_secret }}"
+  register: jenkins_harbor_credential_secret_apply
+  delegate_to: localhost
+  become: false
   no_log: true
-  changed_when: true
 
+# 작성자: 최유준
+# 작성 날짜: 2026-09-08
+#
+# harbor-api-credential: Harbor REST API 전용 Robot Account(robot$seokpan+seokpan-api)의
+# Credential. seokpan-app Issue #58 main Image Pipeline의 Guard/Promote/Cleanup/Verify
+# Stage가 container('python')에서 urllib로 Harbor API(Artifact 조회, Tag 생성/삭제)를
+# 호출할 때 Jenkins Credential Binding(usernamePassword)으로 이 Secret을 참조한다.
+# 위 jenkins-harbor-credential(BuildKit Push/Pull 전용 seokpan-ci 계정)과는 완전히
+# 별개 계정/Secret이며, 절대 서로 대체하지 않는다.
+# harbor_api_robot_name 변수는 harbor role의 defaults/main.yml에 정의된
+# 접두사 없는 짧은 이름("seokpan-api")이며, username은 harbor-robot-dockerconfig와
+# 동일하게 'robot$<project>+<api_robot_name>' 형식으로 조합한다.
+- name: jenkins-harbor-api-credential Secret 적용 (Harbor REST API 전용 Robot Account)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-harbor-api-credential
+        namespace: cicd
+      stringData:
+        username: "robot${{ hostvars['harbor'].harbor_project_name }}+{{ hostvars['harbor'].harbor_api_robot_name }}"
+        password: "{{ vault_harbor_api_robot_secret }}"
+  register: jenkins_harbor_api_credential_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+# 작성자: 최유준
+# 작성 날짜: 2026-09-08
+#
+# harbor-pull-secret: kubelet이 Harbor 프라이빗 이미지를 Pull할 때 쓰는
+# imagePullSecrets 전용 Secret. 기존 harbor-robot-dockerconfig(Opaque,
+# buildctl 볼륨 마운트 전용, Issue #126)와는 목적이 달라 별도 관리함.
+# username/password 조합 방식은 위 harbor-robot-dockerconfig Task와 동일
+# (robot$<project>+<robot_name> 형식 필수 - 과거 이 형식을 빠뜨려 BuildKit→Harbor
+# 인증이 실패했던 이력 있음, 위 주석 참고).
+- name: harbor-pull-secret용 dockerconfigjson 조합
+  ansible.builtin.set_fact:
+    harbor_pull_secret_dockerconfigjson_b64: >-
+      {{
+        {
+          'auths': {
+            hostvars['harbor'].harbor_hostname: {
+              'username': 'robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name,
+              'password': vault_harbor_robot_secret,
+              'auth': (('robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_robot_name ~ ':' ~ vault_harbor_robot_secret) | b64encode)
+            }
+          }
+        } | to_json | b64encode
+      }}
+  no_log: true
+
+- name: harbor-pull-secret 생성/갱신 (kubernetes.io/dockerconfigjson)
+  # [의도적 설계] 이 Task는 check_mode: false로 --check 실행 시에도 실제로
+  # 적용됩니다. 아래 assert가 이 Task의 register 결과(harbor_pull_secret_result)를
+  # 참조하기 때문에, dry-run에서 결과가 없으면 assert가 실패합니다. 이는 팀의
+  # 기존 Ansible Check Mode 원칙(POST/PUT 이후 register 참조 Task는 check_mode:
+  # false + 하위 assert는 when: not ansible_check_mode)을 그대로 따른 것이며,
+  # harbor-robot-dockerconfig Task와 동일한 패턴입니다. 즉 --check로 이 role을
+  # 돌리면 이 Task와 harbor-robot-dockerconfig Task는 실제로 적용되고, assert만
+  # skip됩니다 - 완전한 dry-run이 아님을 실행자가 인지하고 있어야 합니다.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/dockerconfigjson
+      metadata:
+        name: harbor-pull-secret
+        namespace: cicd
+      data:
+        .dockerconfigjson: "{{ harbor_pull_secret_dockerconfigjson_b64 }}"
+  register: harbor_pull_secret_result
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: harbor-pull-secret 생성 결과 확인
+  ansible.builtin.assert:
+    that:
+      - harbor_pull_secret_result is succeeded
+    fail_msg: "harbor-pull-secret 생성/갱신 실패"
+  when: not ansible_check_mode
+
+- name: 생성된 Secret 목록 확인 (요약)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    kind: Secret
+    namespace: cicd
+    name: "{{ item }}"
+  loop:
+    - jenkins-admin
+    - harbor-robot-dockerconfig
+    - jenkins-harbor-credential
+    - jenkins-harbor-api-credential
+    - harbor-pull-secret
+  register: jenkins_secrets_summary
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: 결과 요약 출력
+  ansible.builtin.debug:
+    msg: >-
+      {{ jenkins_secrets_summary.results
+         | map(attribute='resources')
+         | map('length')
+         | list }}

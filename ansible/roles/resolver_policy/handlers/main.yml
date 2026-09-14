@@ -1,0 +1,9 @@
+---
+- name: Reapply NetworkManager resolver state
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - device
+      - reapply
+      - "{{ resolver_policy_device }}"
+  changed_when: false

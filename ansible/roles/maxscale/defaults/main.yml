@@ -19,3 +19,8 @@ maxscale_packages:
 # (MaxScale은 MariaDB Corporation이 배포하는 제품이라 AppStream/baseos에 존재하지 않음)
 mariadb_maxscale_repo_version: "24.02"
 mariadb_repo_setup_url: "https://downloads.mariadb.com/MariaDB/mariadb_repo_setup"
+
+# TLS (이슈 #102)
+# host_vars/maxscale-01.yml의 maxscale_cert_path/maxscale_key_path와 동일 값 유지
+maxscale_cert_path: /etc/pki/seokpan-ca/services/maxscale-01.crt
+maxscale_key_path: /etc/pki/seokpan-ca/services/maxscale-01.key

@@ -1,0 +1,70 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-09-09
+#
+# roles/internal_ca/tasks/bootstrap.yml을 격리된 임시 디렉토리 대상으로
+# 직접 호출한다. 로직을 복제하지 않고 실제 프로덕션 코드를 그대로
+# 실행하므로, role과 테스트 간 drift(이전 리뷰에서 지적된 SKI 추출 방식
+# 불일치 등)가 구조적으로 발생할 수 없다. publish_configmap.yml은
+# include하지 않으므로 운영 클러스터에 영향 없음.
+
+- name: internal_ca bootstrap 로직 격리 검증 (실제 Role 코드 호출)
+  hosts: ansible_controller
+  become: true
+  gather_facts: true
+
+  vars:
+    internal_ca_dir: /tmp/ca_keyusage_test
+    internal_ca_key_path: "{{ internal_ca_dir }}/ca.key"
+    internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+    internal_ca_owner: root
+    internal_ca_group: root
+    internal_ca_key_bits: 4096
+    internal_ca_days: 3650
+    internal_ca_country: KR
+    internal_ca_organization: seokpan
+    internal_ca_common_name: "Test CA KeyUsage Verification"
+
+  tasks:
+    - name: 테스트 환경 정리 (이전 실행 잔여물 제거)
+      ansible.builtin.file:
+        path: "{{ internal_ca_dir }}"
+        state: absent
+
+    - name: "[1회차] 실제 bootstrap.yml 호출 — 최초 발급 경로 검증"
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../roles/internal_ca/tasks/bootstrap.yml"
+
+    - name: 최초 발급된 CA에 필수 확장이 바로 포함됐는지 확인 (리뷰 지적 #2 검증)
+      ansible.builtin.command:
+        cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
+      register: fresh_cert_text
+      changed_when: false
+
+    - name: "[검증] 최초 발급 경로 자체가 필수 확장을 포함하는지"
+      ansible.builtin.assert:
+        that:
+          - "'CA:TRUE' in fresh_cert_text.stdout"
+          - "'X509v3 Key Usage: critical' in fresh_cert_text.stdout"
+          - "'Certificate Sign' in fresh_cert_text.stdout"
+          - "'CRL Sign' in fresh_cert_text.stdout"
+        success_msg: "[검증 통과] 최초 발급 경로에서 이미 필수 확장 포함 확인"
+
+    - name: 재현을 위해 Key Usage 없는 구버전 CA로 강제 교체 (개인키는 유지)
+      ansible.builtin.command:
+        cmd: >
+          openssl req -x509 -new -nodes
+          -key {{ internal_ca_key_path }}
+          -sha256 -days {{ internal_ca_days }}
+          -out {{ internal_ca_cert_path }}
+          -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ internal_ca_common_name }}"
+      # 의도적으로 -addext 없음 - 마이그레이션 경로 재현용
+
+    - name: "[2회차] 실제 bootstrap.yml 재호출 — 마이그레이션(보정) 경로 검증"
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../roles/internal_ca/tasks/bootstrap.yml"
+
+    - name: 정리
+      ansible.builtin.file:
+        path: "{{ internal_ca_dir }}"
+        state: absent

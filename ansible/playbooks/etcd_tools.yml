@@ -1,0 +1,47 @@
+---
+# Owner: 정태훈
+# Scope: Kubernetes / Runtime Platform
+# Project: 石나가는 판단
+# Purpose: Prepare Runtime-matched etcd DR tooling on Control Plane nodes
+
+- name: Prepare etcd DR tooling on Control Plane nodes
+  hosts: control_planes
+  gather_facts: false
+  become: true
+
+  roles:
+    - etcd_tools
+
+  post_tasks:
+    - name: Assert Control Plane etcd image consistency
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              ansible_play_hosts_all
+              | map('extract', hostvars, 'etcd_tools_runtime_image')
+              | unique
+              | list
+              | length
+            ) == 1
+          - >-
+            (
+              ansible_play_hosts_all
+              | map('extract', hostvars, 'etcd_tools_runtime_image_ref')
+              | unique
+              | list
+              | length
+            ) == 1
+          - >-
+            (
+              ansible_play_hosts_all
+              | map('extract', hostvars, 'etcd_tools_runtime_version')
+              | unique
+              | list
+              | length
+            ) == 1
+        fail_msg: >-
+          Control Plane etcd Runtime drift detected.
+        success_msg: >-
+          Control Plane etcd image, imageRef and binary version are consistent.
+      run_once: true

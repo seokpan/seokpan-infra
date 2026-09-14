@@ -1,0 +1,104 @@
+---
+# 작성자: 최유준
+# 작성 날짜: 2026-09-09
+#
+# bootstrap.yml의 check_mode(dry-run) 안전성 전용 검증.
+# 반드시 `ansible-playbook ... --check` 옵션과 함께 실행해야 한다.
+#
+# 사전 준비(결함 있는 CA를 만들어두는 과정)는 bootstrap.yml을 재사용하지
+# 않고 openssl 명령을 직접 사용한다. include_tasks는 check_mode 속성을
+# 가질 수 없어 상위 --check를 그대로 상속하므로, bootstrap.yml 호출은
+# 이 playbook에서 검증 대상인 마지막 한 번으로 한정한다.
+
+- name: internal_ca bootstrap check_mode 안전성 검증
+  hosts: ansible_controller
+  become: true
+  gather_facts: true
+
+  vars:
+    internal_ca_dir: /tmp/ca_keyusage_checkmode_test
+    internal_ca_key_path: "{{ internal_ca_dir }}/ca.key"
+    internal_ca_cert_path: "{{ internal_ca_dir }}/ca.crt"
+    internal_ca_owner: root
+    internal_ca_group: root
+    internal_ca_key_bits: 4096
+    internal_ca_days: 3650
+    internal_ca_country: KR
+    internal_ca_organization: seokpan
+    internal_ca_common_name: "Test CA CheckMode Verification"
+
+  tasks:
+    # ============================================================
+    # 0. 사전 준비 (bootstrap.yml 미사용, openssl 직접 호출)
+    #    --check로 playbook을 돌려도 이 태스크들은 무조건 실제 실행되어야
+    #    "보정이 필요한 CA" 상태를 만들어 놓을 수 있다.
+    # ============================================================
+    - name: 테스트 환경 정리 (이전 잔여물 제거)
+      ansible.builtin.file:
+        path: "{{ internal_ca_dir }}"
+        state: absent
+      check_mode: false
+
+    - name: 테스트 디렉토리 생성
+      ansible.builtin.file:
+        path: "{{ internal_ca_dir }}"
+        state: directory
+        mode: "0700"
+      check_mode: false
+
+    - name: 사전 준비 - CA 개인키 생성 (bootstrap.yml 미사용, 직접 openssl)
+      ansible.builtin.command:
+        cmd: openssl genrsa -out {{ internal_ca_key_path }} {{ internal_ca_key_bits }}
+      check_mode: false
+
+    - name: 사전 준비 - Key Usage 없는 결함 CA 발급 (검증 대상 상태 재현)
+      ansible.builtin.command:
+        cmd: >
+          openssl req -x509 -new -nodes
+          -key {{ internal_ca_key_path }}
+          -sha256 -days {{ internal_ca_days }}
+          -out {{ internal_ca_cert_path }}
+          -subj "/C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ internal_ca_common_name }}"
+      check_mode: false
+      # 의도적으로 -addext 없음 - 보정이 필요한 결함 상태를 재현
+
+    - name: 사전 준비 결과 확인 - Key Usage 없는 상태인지
+      ansible.builtin.command:
+        cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
+      register: pre_state
+      changed_when: false
+      check_mode: false
+
+    - name: "[사전 조건 확인] 결함 상태(Key Usage 없음) 재현 성공 여부"
+      ansible.builtin.assert:
+        that:
+          - "'X509v3 Key Usage' not in pre_state.stdout"
+        fail_msg: "사전 준비 실패 - 결함 상태 재현이 안 됐습니다."
+        success_msg: "사전 준비 완료 - Key Usage 없는 CA 재현 확인"
+      check_mode: false
+
+    # ============================================================
+    # 1. 검증 대상 - bootstrap.yml을 있는 그대로 include
+    #    check_mode 속성을 붙이지 않으므로 상위 ansible-playbook --check
+    #    여부를 그대로 상속받는다. 여기서만 dry-run이 실제로 시험된다.
+    # ============================================================
+    - name: "[검증 대상] bootstrap.yml 호출 (이 playbook은 --check로 실행해야 함)"
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../roles/internal_ca/tasks/bootstrap.yml"
+
+    # ============================================================
+    # 2. 사후 검증 - dry-run이 실제 파일을 바꾸지 않았는지 확인
+    # ============================================================
+    - name: dry-run 이후 CA 파일 상태 재조회
+      ansible.builtin.command:
+        cmd: openssl x509 -in {{ internal_ca_cert_path }} -noout -text
+      register: post_dryrun_cert_text
+      changed_when: false
+      check_mode: false
+
+    - name: "[검증] --check 실행 후에도 CA가 여전히 결함 상태(Key Usage 없음)로 남아있는지"
+      ansible.builtin.assert:
+        that:
+          - "'X509v3 Key Usage' not in post_dryrun_cert_text.stdout"
+        fail_msg: >-
+          --check 실행인데도 실제 CA 파일이 변경됐습니다.

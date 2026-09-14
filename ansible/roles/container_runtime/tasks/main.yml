@@ -47,3 +47,73 @@
     name: containerd
     enabled: true
     state: started
+
+# crictl Runtime Tooling
+- name: Ensure crictl cache directory exists
+  ansible.builtin.file:
+    path: "{{ crictl_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download pinned crictl archive
+  ansible.builtin.get_url:
+    url: "{{ crictl_download_url }}"
+    dest: "{{ crictl_cache_dir }}/{{ crictl_archive }}"
+    checksum: "sha256:{{ crictl_archive_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Extract pinned crictl binary
+  ansible.builtin.unarchive:
+    src: "{{ crictl_cache_dir }}/{{ crictl_archive }}"
+    dest: "{{ crictl_cache_dir }}"
+    remote_src: true
+    creates: "{{ crictl_cache_dir }}/crictl"
+
+- name: Install pinned crictl binary
+  ansible.builtin.copy:
+    src: "{{ crictl_cache_dir }}/crictl"
+    dest: "{{ crictl_install_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure crictl containerd endpoint
+  ansible.builtin.template:
+    src: crictl.yaml.j2
+    dest: "{{ crictl_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Verify installed crictl version
+  ansible.builtin.command:
+    cmd: "{{ crictl_install_path }} --version"
+  register: crictl_cli_version
+  changed_when: false
+
+- name: Assert installed crictl version
+  ansible.builtin.assert:
+    that:
+      - "'crictl version ' ~ crictl_version in crictl_cli_version.stdout"
+    fail_msg: >-
+      Expected crictl {{ crictl_version }},
+      actual output: {{ crictl_cli_version.stdout }}
+
+- name: Verify crictl containerd CRI connection
+  ansible.builtin.command:
+    cmd: "{{ crictl_install_path }} version"
+  register: crictl_runtime_version
+  changed_when: false
+
+- name: Assert crictl is connected to containerd
+  ansible.builtin.assert:
+    that:
+      - "'RuntimeName:  containerd' in crictl_runtime_version.stdout or 'RuntimeName: containerd' in crictl_runtime_version.stdout"
+    fail_msg: >-
+      crictl is not connected to the expected containerd Runtime.
+      Output: {{ crictl_runtime_version.stdout }}

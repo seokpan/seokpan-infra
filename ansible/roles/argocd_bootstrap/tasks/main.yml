@@ -74,61 +74,64 @@
   delegate_to: localhost
   become: false
 
-- name: Root Application 임시 Manifest 파일 생성
-  ansible.builtin.tempfile:
-    state: file
-    prefix: "root-application-{{ argocd_namespace }}-"
-    suffix: ".yaml"
-  register: root_application_manifest_temp
-  delegate_to: localhost
-  become: false
+- name: Root Application 배포 (임시 Manifest 생성 → 적용 → 정리)
+  when: not ansible_check_mode
+  block:
+    - name: Root Application 임시 Manifest 파일 생성
+      ansible.builtin.tempfile:
+        state: file
+        prefix: "root-application-{{ argocd_namespace }}-"
+        suffix: ".yaml"
+      register: root_application_manifest_temp
+      delegate_to: localhost
+      become: false
 
-- name: Root Application Manifest 생성
-  ansible.builtin.template:
-    src: root-application.yaml.j2
-    dest: "{{ root_application_manifest_temp.path }}"
-    mode: "0600"
-  delegate_to: localhost
-  become: false
+    - name: Root Application Manifest 생성
+      ansible.builtin.template:
+        src: root-application.yaml.j2
+        dest: "{{ root_application_manifest_temp.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
 
-- name: Root Application 등록/갱신
-  kubernetes.core.k8s:
-    kubeconfig: "{{ argocd_kubeconfig }}"
-    src: "{{ root_application_manifest_temp.path }}"
-    state: present
-    server_side_apply:
-      field_manager: "{{ argocd_field_manager }}"
-      force_conflicts: true
-  register: root_app_apply_result
-  delegate_to: localhost
-  become: false
+    - name: Root Application 등록/갱신
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        src: "{{ root_application_manifest_temp.path }}"
+        state: present
+        server_side_apply:
+          field_manager: "{{ argocd_field_manager }}"
+          force_conflicts: true
+      register: root_app_apply_result
+      delegate_to: localhost
+      become: false
 
-- name: Root Application 임시 Manifest 제거
-  ansible.builtin.file:
-    path: "{{ root_application_manifest_temp.path }}"
-    state: absent
-  delegate_to: localhost
-  become: false
+    - name: Root Application 임시 Manifest 제거
+      ansible.builtin.file:
+        path: "{{ root_application_manifest_temp.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
 
-- name: Root Application Synced/Healthy 확인
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ argocd_kubeconfig }}"
-    api_version: argoproj.io/v1alpha1
-    kind: Application
-    name: "{{ root_application_name }}"
-    namespace: "{{ argocd_namespace }}"
-  register: root_app_info
-  until: >
-    (root_app_info.resources | length > 0) and
-    (root_app_info.resources[0].status.sync.status | default('')) == 'Synced' and
-    (root_app_info.resources[0].status.health.status | default('')) == 'Healthy'
-  retries: "{{ root_app_sync_retries }}"
-  delay: "{{ root_app_sync_delay }}"
-  delegate_to: localhost
-  become: false
+    - name: Root Application Synced/Healthy 확인
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        name: "{{ root_application_name }}"
+        namespace: "{{ argocd_namespace }}"
+      register: root_app_info
+      until: >
+        (root_app_info.resources | length > 0) and
+        (root_app_info.resources[0].status.sync.status | default('')) == 'Synced' and
+        (root_app_info.resources[0].status.health.status | default('')) == 'Healthy'
+      retries: "{{ root_app_sync_retries }}"
+      delay: "{{ root_app_sync_delay }}"
+      delegate_to: localhost
+      become: false
 
-- name: Root Application 상태 출력 (Evidence 확인용)
-  ansible.builtin.debug:
-    msg: >-
-      root Application sync={{ root_app_info.resources[0].status.sync.status }}
-      health={{ root_app_info.resources[0].status.health.status }}
+    - name: Root Application 상태 출력 (Evidence 확인용)
+      ansible.builtin.debug:
+        msg: >-
+          root Application sync={{ root_app_info.resources[0].status.sync.status }}
+          health={{ root_app_info.resources[0].status.health.status }}

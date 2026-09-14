@@ -1,0 +1,15 @@
+[Unit]
+Description=Seokpan MariaDB Isolated Restore Instance (DR validation, 이슈 #55)
+After=network.target
+
+[Service]
+Type=simple
+User=mysql
+Group=mysql
+ExecStart=/usr/sbin/mariadbd --datadir={{ backup_restore_target_dir }} \
+  --socket={{ backup_restore_socket }} --skip-networking \
+  --pid-file={{ backup_restore_target_dir }}/mariadb-restore.pid
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
