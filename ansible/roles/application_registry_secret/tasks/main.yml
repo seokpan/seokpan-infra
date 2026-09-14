@@ -1,0 +1,100 @@
+---
+# Kubernetes Secret의 실제 값은 Ansible/Vault가 공급하고 GitOps는 이름만 참조한다.
+
+- name: Application Runtime Harbor Pull Secret 입력 검증
+  ansible.builtin.assert:
+    that:
+      - cluster_kubeconfig is defined
+      - hostvars['harbor'].harbor_hostname is defined
+      - hostvars['harbor'].harbor_project_name is defined
+      - hostvars['harbor'].harbor_runtime_pull_robot_name is defined
+      - vault_harbor_runtime_pull_secret is defined
+      - (vault_harbor_runtime_pull_secret | string | length) > 0
+    fail_msg: >-
+      Application Runtime Harbor Pull Secret 공급에 필요한 Vault/Harbor 변수가 없습니다.
+  no_log: true
+
+- name: Application Runtime harbor-pull-secret 데이터 조합
+  ansible.builtin.set_fact:
+    _application_harbor_pull_dockerconfigjson: >-
+      {{
+        {
+          'auths': {
+            hostvars['harbor'].harbor_hostname: {
+              'username': 'robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_runtime_pull_robot_name,
+              'password': vault_harbor_runtime_pull_secret,
+              'auth': (('robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_runtime_pull_robot_name ~ ':' ~ vault_harbor_runtime_pull_secret) | b64encode)
+            }
+          }
+        } | to_json
+      }}
+  no_log: true
+
+- name: Application Runtime harbor-pull-secret 생성 또는 갱신
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/dockerconfigjson
+      metadata:
+        name: harbor-pull-secret
+        namespace: application
+      stringData:
+        .dockerconfigjson: "{{ _application_harbor_pull_dockerconfigjson }}"
+  register: _application_harbor_pull_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Application Runtime harbor-pull-secret 적용 결과 확인
+  ansible.builtin.assert:
+    that:
+      - _application_harbor_pull_secret_apply is succeeded
+    fail_msg: "application/harbor-pull-secret 생성 또는 갱신 실패"
+  when: not ansible_check_mode
+
+- name: Application Runtime harbor-pull-secret 구조 조회
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: application
+    name: harbor-pull-secret
+  register: _application_harbor_pull_secret_info
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Application Runtime harbor-pull-secret 구조 검증
+  ansible.builtin.assert:
+    that:
+      - (_application_harbor_pull_secret_info.resources | length) == 1
+      - _application_harbor_pull_secret_info.resources[0].type == 'kubernetes.io/dockerconfigjson'
+      - "'.dockerconfigjson' in _application_harbor_pull_secret_info.resources[0].data"
+    fail_msg: "application/harbor-pull-secret Type/Key 계약 불일치"
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Application Runtime harbor-pull-secret Docker 설정 해석
+  ansible.builtin.set_fact:
+    _application_harbor_pull_config: >-
+      {{ _application_harbor_pull_secret_info.resources[0].data['.dockerconfigjson']
+         | b64decode | from_json }}
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Application Runtime harbor-pull-secret Registry와 계정 검증
+  ansible.builtin.assert:
+    that:
+      - (_application_harbor_pull_config.auths | length) == 1
+      - hostvars['harbor'].harbor_hostname in _application_harbor_pull_config.auths
+      - _application_harbor_pull_config.auths[hostvars['harbor'].harbor_hostname].username == 'robot$' ~ hostvars['harbor'].harbor_project_name ~ '+' ~ hostvars['harbor'].harbor_runtime_pull_robot_name
+      - (_application_harbor_pull_config.auths[hostvars['harbor'].harbor_hostname].password | string | length) > 0
+      - (_application_harbor_pull_config.auths[hostvars['harbor'].harbor_hostname].auth | string | length) > 0
+      - (_application_harbor_pull_config.auths[hostvars['harbor'].harbor_hostname].auth | b64decode) == _application_harbor_pull_config.auths[hostvars['harbor'].harbor_hostname].username ~ ':' ~ _application_harbor_pull_config.auths[hostvars['harbor'].harbor_hostname].password
+    fail_msg: "application/harbor-pull-secret Registry/Robot 계약 불일치"
+  when: not ansible_check_mode
+  no_log: true
