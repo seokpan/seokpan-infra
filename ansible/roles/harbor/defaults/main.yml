@@ -76,3 +76,7 @@ harbor_gc_delete_untagged: true
 
 
 harbor_api_robot_name: "seokpan-api"
+
+# Kubernetes application Namespace의 Backend/Frontend Runtime 전용.
+# CI Build/Push 및 Harbor REST API Credential과 분리하고 Pull만 허용한다.
+harbor_runtime_pull_robot_name: "seokpan-runtime-pull"

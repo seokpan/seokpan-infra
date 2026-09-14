@@ -1,0 +1,15 @@
+---
+# Application Runtime 전용 Harbor pull-only Robot만 생성·검증하는 실행 진입점.
+# Harbor 설치나 기존 CI/API Robot 작업은 재실행하지 않는다.
+
+- name: Configure Harbor Application Runtime Pull Robot
+  hosts: registry
+  gather_facts: false
+  connection: local
+  become: false
+
+  tasks:
+    - name: Apply Application Runtime Pull Robot
+      ansible.builtin.include_role:
+        name: harbor
+        tasks_from: robot_account_runtime_pull
