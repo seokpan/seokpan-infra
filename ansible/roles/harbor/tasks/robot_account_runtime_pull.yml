@@ -65,14 +65,34 @@
     that:
       - (_harbor_runtime_pull_robot_matches[0].permissions | length) == 1
       - not (_harbor_runtime_pull_robot_matches[0].disable | default(true) | bool)
+      - _harbor_runtime_pull_robot_matches[0].expires_at is defined
+      - (_harbor_runtime_pull_robot_matches[0].expires_at | default(0) | int) == -1
       - _harbor_runtime_pull_robot_matches[0].permissions[0].kind == 'project'
       - _harbor_runtime_pull_robot_matches[0].permissions[0].namespace == harbor_project_name
       - (_harbor_runtime_pull_robot_matches[0].permissions[0].access | length) == 1
       - _harbor_runtime_pull_robot_matches[0].permissions[0].access[0].resource == 'repository'
       - _harbor_runtime_pull_robot_matches[0].permissions[0].access[0].action == 'pull'
     fail_msg: >-
-      기존 Application Runtime Pull Robot의 권한이 repository:pull 전용 계약과 다릅니다.
+      기존 Application Runtime Pull Robot의 활성·무기한·repository:pull 전용 계약이 다릅니다.
       자동 수정하거나 재생성하지 않습니다.
+  when: (_harbor_runtime_pull_robot_matches | length) == 1
+
+- name: 기존 Application Runtime Pull Robot Secret 인계 상태 판정
+  ansible.builtin.set_fact:
+    _harbor_runtime_pull_vault_secret_available: >-
+      {{ (vault_harbor_runtime_pull_secret | default('') | string | length) > 0 }}
+  when: (_harbor_runtime_pull_robot_matches | length) == 1
+  no_log: true
+
+- name: 기존 Application Runtime Pull Robot Secret 인계 상태 검증
+  ansible.builtin.assert:
+    that:
+      - _harbor_runtime_pull_vault_secret_available | bool
+    fail_msg: >-
+      기존 Application Runtime Pull Robot은 유효하지만
+      vault_harbor_runtime_pull_secret이 없습니다. Harbor가 생성 시 한 번만 제공한
+      Secret은 다시 조회할 수 없으므로 자동 삭제·재생성하지 않습니다.
+      담당자 확인 후 명시적으로 Robot을 재발급하고 새 Secret을 Vault에 등록하세요.
   when: (_harbor_runtime_pull_robot_matches | length) == 1
 
 - name: Application Runtime Pull Robot 생성 (Repository Pull 전용)
