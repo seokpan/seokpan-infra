@@ -12,6 +12,7 @@ credentials
 credentials.*
 *credentials*
 *credential*
+!ansible/tools/credential-init
 
 # Password files
 *password*
