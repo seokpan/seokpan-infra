@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Initial per-user setup for ansible-safe-run (ars).
+
+set +x
+set -Eeuo pipefail
+
+if (( $# != 0 )); then
+    printf '%s\n' '사용법: ./tools/ars-setup' >&2
+    exit 2
+fi
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    printf '%s\n' 'source로 실행하지 마세요. ./tools/ars-setup 으로 실행하세요.' >&2
+    return 2 2>/dev/null || exit 2
+fi
+
+if [[ "${EUID}" -eq 0 ]]; then
+    printf '%s\n' 'root 계정으로 실행할 수 없습니다.' >&2
+    exit 2
+fi
+
+if [[ "${UID}" -ne "${EUID}" || "$(id -rg)" -ne "$(id -g)" ]]; then
+    printf '%s\n' 'sudo/setuid 형태로 ars-setup을 실행할 수 없습니다.' >&2
+    exit 2
+fi
+
+if [[ -n "${SUDO_USER:-}" || -n "${SUDO_UID:-}" || -n "${SUDO_GID:-}" ]]; then
+    printf '%s\n' 'sudo를 통한 ars-setup 실행은 허용하지 않습니다.' >&2
+    exit 2
+fi
+
+CURRENT_USER="$(id -un)"
+
+case "$CURRENT_USER" in
+    ansible|jth|ksh|cyj)
+        ;;
+    *)
+        printf '허용되지 않은 사용자입니다: %s\n' "$CURRENT_USER" >&2
+        exit 2
+        ;;
+esac
+
+ANSIBLE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+VENV="$ANSIBLE_ROOT/.venv"
+PYTHON="$VENV/bin/python"
+PIP="$VENV/bin/pip"
+ANSIBLE_GALAXY="$VENV/bin/ansible-galaxy"
+SAFE_RUN="$ANSIBLE_ROOT/ansible-safe-run"
+CREDENTIAL_INIT="$ANSIBLE_ROOT/tools/credential-init"
+REQUIREMENTS_TXT="$ANSIBLE_ROOT/requirements.txt"
+REQUIREMENTS_YML="$ANSIBLE_ROOT/requirements.yml"
+BASHRC="$HOME/.bashrc"
+REQUIRED_PYTHON_VERSION="3.12.13"
+
+printf -v SAFE_RUN_SHELL_Q '%q' "$SAFE_RUN"
+ALIAS_LINE="alias ars=$SAFE_RUN_SHELL_Q"
+
+# 실제 설치/Keyring 변경 전에 기존 ars alias 충돌을 먼저 검사한다.
+if [[ -f "$BASHRC" ]] && grep -Eq '^[[:space:]]*alias[[:space:]]+ars=' "$BASHRC"; then
+    if ! grep -Fqx "$ALIAS_LINE" "$BASHRC"; then
+        printf '%s\n' '기존 ars alias가 다른 경로로 등록되어 있습니다.' >&2
+        printf '%s\n' '아무 작업도 수행하지 않고 중단합니다. ~/.bashrc의 ars 설정을 먼저 확인하세요.' >&2
+        exit 2
+    fi
+fi
+
+if [[ ! -f "$REQUIREMENTS_TXT" || ! -f "$REQUIREMENTS_YML" ]]; then
+    printf '%s\n' 'requirements.txt 또는 requirements.yml이 없습니다.' >&2
+    exit 2
+fi
+
+if [[ ! -x "$SAFE_RUN" ]]; then
+    printf '%s\n' 'ansible-safe-run 실행 파일이 없습니다.' >&2
+    exit 2
+fi
+
+if [[ ! -x "$CREDENTIAL_INIT" ]]; then
+    printf '%s\n' 'tools/credential-init 실행 파일이 없습니다.' >&2
+    exit 2
+fi
+
+PYTHON312="$(command -v python3.12 || true)"
+if [[ -z "$PYTHON312" ]]; then
+    printf 'Python %s 실행 파일을 찾을 수 없습니다. 시스템 Python 설치 상태를 먼저 확인하세요.\n' \
+        "$REQUIRED_PYTHON_VERSION" >&2
+    exit 2
+fi
+
+SYSTEM_PYTHON_VERSION="$($PYTHON312 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+if [[ "$SYSTEM_PYTHON_VERSION" != "$REQUIRED_PYTHON_VERSION" ]]; then
+    printf '%s\n' '프로젝트 Python 버전이 고정 기준과 일치하지 않습니다.' >&2
+    printf '필요: %s\n' "$REQUIRED_PYTHON_VERSION" >&2
+    printf '실제: %s\n' "$SYSTEM_PYTHON_VERSION" >&2
+    exit 2
+fi
+
+if [[ ! -x "$PYTHON" ]]; then
+    printf '%s\n' '[1/4] 프로젝트 Python 가상환경(.venv)을 생성합니다.'
+    "$PYTHON312" -m venv "$VENV"
+fi
+
+VENV_PYTHON_VERSION="$($PYTHON -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+if [[ "$VENV_PYTHON_VERSION" != "$REQUIRED_PYTHON_VERSION" ]]; then
+    printf '%s\n' '기존 .venv의 Python 버전이 고정 기준과 일치하지 않습니다.' >&2
+    printf '필요: %s\n' "$REQUIRED_PYTHON_VERSION" >&2
+    printf '실제: %s\n' "$VENV_PYTHON_VERSION" >&2
+    printf '%s\n' '기존 .venv를 임의로 삭제하지 말고 상태를 확인한 뒤 복구하세요.' >&2
+    exit 2
+fi
+
+if [[ ! -x "$PIP" ]]; then
+    printf '%s\n' '.venv/bin/pip 실행 파일이 없습니다.' >&2
+    exit 2
+fi
+
+printf 'Project Python exact lock: %s\n' "$VENV_PYTHON_VERSION"
+printf '%s\n' '[2/4] 프로젝트 Python 패키지를 확인/설치합니다.'
+"$PIP" install -r "$REQUIREMENTS_TXT"
+
+if [[ ! -x "$ANSIBLE_GALAXY" ]]; then
+    printf '%s\n' '.venv/bin/ansible-galaxy 실행 파일이 없습니다.' >&2
+    exit 2
+fi
+
+printf '%s\n' '[3/4] 프로젝트 Ansible Collection을 확인/설치합니다.'
+ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_ROOT/.ansible/collections" \
+"$ANSIBLE_GALAXY" collection install \
+    -r "$REQUIREMENTS_YML" \
+    -p "$ANSIBLE_ROOT/.ansible/collections"
+
+printf '%s\n' '[4/4] 현재 사용자 Kernel Keyring에 Credential을 등록합니다.'
+"$CREDENTIAL_INIT"
+
+if [[ -f "$BASHRC" ]] && grep -Fqx "$ALIAS_LINE" "$BASHRC"; then
+    printf '%s\n' 'ars alias가 이미 현재 checkout 경로로 등록되어 있습니다.'
+else
+    touch "$BASHRC"
+    printf '\n%s\n' "$ALIAS_LINE" >> "$BASHRC"
+    printf '%s\n' 'ars alias를 ~/.bashrc에 등록했습니다.'
+fi
+
+printf '\n'
+printf '%s\n' 'ars 최초 설정이 완료되었습니다.'
+printf '실행 파일: %s\n' "$SAFE_RUN"
+printf '%s\n' '새 터미널을 열거나 다시 로그인한 뒤 ars 명령을 사용하세요.'
