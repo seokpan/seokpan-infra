@@ -50,7 +50,10 @@ CREDENTIAL_INIT="$ANSIBLE_ROOT/tools/credential-init"
 REQUIREMENTS_TXT="$ANSIBLE_ROOT/requirements.txt"
 REQUIREMENTS_YML="$ANSIBLE_ROOT/requirements.yml"
 BASHRC="$HOME/.bashrc"
-ALIAS_LINE="alias ars='$SAFE_RUN'"
+REQUIRED_PYTHON_VERSION="3.12.13"
+
+printf -v SAFE_RUN_SHELL_Q '%q' "$SAFE_RUN"
+ALIAS_LINE="alias ars=$SAFE_RUN_SHELL_Q"
 
 # 실제 설치/Keyring 변경 전에 기존 ars alias 충돌을 먼저 검사한다.
 if [[ -f "$BASHRC" ]] && grep -Eq '^[[:space:]]*alias[[:space:]]+ars=' "$BASHRC"; then
@@ -76,16 +79,33 @@ if [[ ! -x "$CREDENTIAL_INIT" ]]; then
     exit 2
 fi
 
+PYTHON312="$(command -v python3.12 || true)"
+if [[ -z "$PYTHON312" ]]; then
+    printf 'Python %s 실행 파일을 찾을 수 없습니다. 시스템 Python 설치 상태를 먼저 확인하세요.\n' \
+        "$REQUIRED_PYTHON_VERSION" >&2
+    exit 2
+fi
+
+SYSTEM_PYTHON_VERSION="$($PYTHON312 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+if [[ "$SYSTEM_PYTHON_VERSION" != "$REQUIRED_PYTHON_VERSION" ]]; then
+    printf '%s\n' '프로젝트 Python 버전이 고정 기준과 일치하지 않습니다.' >&2
+    printf '필요: %s\n' "$REQUIRED_PYTHON_VERSION" >&2
+    printf '실제: %s\n' "$SYSTEM_PYTHON_VERSION" >&2
+    exit 2
+fi
+
 if [[ ! -x "$PYTHON" ]]; then
-    PYTHON312="$(command -v python3.12 || true)"
-
-    if [[ -z "$PYTHON312" ]]; then
-        printf '%s\n' 'python3.12 실행 파일이 없습니다. 시스템 Python 설치 상태를 먼저 확인하세요.' >&2
-        exit 2
-    fi
-
     printf '%s\n' '[1/4] 프로젝트 Python 가상환경(.venv)을 생성합니다.'
     "$PYTHON312" -m venv "$VENV"
+fi
+
+VENV_PYTHON_VERSION="$($PYTHON -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+if [[ "$VENV_PYTHON_VERSION" != "$REQUIRED_PYTHON_VERSION" ]]; then
+    printf '%s\n' '기존 .venv의 Python 버전이 고정 기준과 일치하지 않습니다.' >&2
+    printf '필요: %s\n' "$REQUIRED_PYTHON_VERSION" >&2
+    printf '실제: %s\n' "$VENV_PYTHON_VERSION" >&2
+    printf '%s\n' '기존 .venv를 임의로 삭제하지 말고 상태를 확인한 뒤 복구하세요.' >&2
+    exit 2
 fi
 
 if [[ ! -x "$PIP" ]]; then
@@ -93,6 +113,7 @@ if [[ ! -x "$PIP" ]]; then
     exit 2
 fi
 
+printf 'Project Python exact lock: %s\n' "$VENV_PYTHON_VERSION"
 printf '%s\n' '[2/4] 프로젝트 Python 패키지를 확인/설치합니다.'
 "$PIP" install -r "$REQUIREMENTS_TXT"
 
@@ -121,5 +142,4 @@ fi
 printf '\n'
 printf '%s\n' 'ars 최초 설정이 완료되었습니다.'
 printf '실행 파일: %s\n' "$SAFE_RUN"
-printf '%s\n' '새 터미널을 열거나 다시 로그인하면 ars 명령을 사용할 수 있습니다.'
-printf '%s\n' '현재 터미널에서 바로 사용하려면 다음 명령을 실행하세요: source ~/.bashrc'
+printf '%s\n' '새 터미널을 열거나 다시 로그인한 뒤 ars 명령을 사용하세요.'
