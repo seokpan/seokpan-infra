@@ -1,0 +1,12 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-09-15
+#
+# jenkins_secrets.yml / alertmanager_secret.yml(PR #98 반영 기준)과 동일하게
+# hosts: localhost / connection: local / gather_facts: false.
+
+- name: Alertmanager SMTP(Resend) Preflight
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - alertmanager_smtp_preflight
