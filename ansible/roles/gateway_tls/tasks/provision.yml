@@ -13,12 +13,15 @@
     owner: root
     group: root
     mode: "0700"
+  when: gateway_tls_source == 'internal_ca'
 
 - name: Gateway 전용 Private Key 생성
   ansible.builtin.command:
     cmd: >-
       openssl genrsa -out {{ gateway_tls_key_path }} {{ gateway_tls_key_bits }}
-  when: gateway_tls_needs_issue
+  when:
+    - gateway_tls_source == 'internal_ca'
+    - gateway_tls_needs_issue
   no_log: true
 
 - name: Gateway CSR 생성
@@ -29,7 +32,9 @@
       -out {{ gateway_tls_csr_path }}
       -subj /C={{ internal_ca_country }}/O={{ internal_ca_organization }}/CN={{ gateway_tls_fqdn }}
       -addext subjectAltName={{ gateway_tls_san }}
-  when: gateway_tls_needs_issue
+  when:
+    - gateway_tls_source == 'internal_ca'
+    - gateway_tls_needs_issue
   no_log: true
 
 - name: Gateway SAN Extension 파일 생성
@@ -39,7 +44,9 @@
     owner: root
     group: root
     mode: "0600"
-  when: gateway_tls_needs_issue
+  when:
+    - gateway_tls_source == 'internal_ca'
+    - gateway_tls_needs_issue
 
 - name: Internal Root CA로 Gateway Certificate 서명
   ansible.builtin.command:
@@ -53,7 +60,9 @@
       -days {{ gateway_tls_days }}
       -sha256
       -extfile {{ gateway_tls_ext_path }}
-  when: gateway_tls_needs_issue
+  when:
+    - gateway_tls_source == 'internal_ca'
+    - gateway_tls_needs_issue
   no_log: true
 
 - name: Gateway Private Key 권한 고정
@@ -62,6 +71,7 @@
     owner: root
     group: root
     mode: "0600"
+  when: gateway_tls_source == 'internal_ca'
 
 - name: Gateway Certificate 권한 고정
   ansible.builtin.file:
@@ -69,18 +79,23 @@
     owner: root
     group: root
     mode: "0644"
+  when: gateway_tls_source == 'internal_ca'
 
 - name: 임시 CSR 제거
   ansible.builtin.file:
     path: "{{ gateway_tls_csr_path }}"
     state: absent
-  when: gateway_tls_needs_issue
+  when:
+    - gateway_tls_source == 'internal_ca'
+    - gateway_tls_needs_issue
 
 - name: 임시 SAN Extension 파일 제거
   ansible.builtin.file:
     path: "{{ gateway_tls_ext_path }}"
     state: absent
-  when: gateway_tls_needs_issue
+  when:
+    - gateway_tls_source == 'internal_ca'
+    - gateway_tls_needs_issue
 
 # ============================================================
 # 2. 발급 결과 최종 검증
@@ -89,35 +104,44 @@
 - name: Gateway Certificate Hostname/SAN 최종 검증
   ansible.builtin.command:
     cmd: >-
-      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      openssl x509 -in {{ gateway_tls_effective_cert_path }} -noout
       -checkhost {{ gateway_tls_fqdn }}
   changed_when: false
 
 - name: Gateway Certificate 만료 기준 최종 검증
   ansible.builtin.command:
     cmd: >-
-      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      openssl x509 -in {{ gateway_tls_effective_cert_path }} -noout
       -checkend {{ gateway_tls_renew_before_seconds }}
   changed_when: false
 
-- name: Gateway Certificate Modulus 최종 확인
-  ansible.builtin.command:
-    cmd: "openssl x509 -in {{ gateway_tls_cert_path }} -noout -modulus"
-  register: gateway_tls_final_cert_modulus
+- name: Gateway Certificate Public Key 최종 확인
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl x509 -in {{ gateway_tls_effective_cert_path | quote }} -pubkey -noout |
+      openssl pkey -pubin -outform DER |
+      sha256sum
+    executable: /bin/bash
+  register: gateway_tls_final_cert_public_key
   changed_when: false
   no_log: true
 
-- name: Gateway Private Key Modulus 최종 확인
-  ansible.builtin.command:
-    cmd: "openssl rsa -in {{ gateway_tls_key_path }} -noout -modulus"
-  register: gateway_tls_final_key_modulus
+- name: Gateway Private Key Public Key 최종 확인
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl pkey -in {{ gateway_tls_effective_key_path | quote }} -pubout -outform DER |
+      sha256sum
+    executable: /bin/bash
+  register: gateway_tls_final_key_public_key
   changed_when: false
   no_log: true
 
 - name: Gateway Certificate / Private Key Pair 검증
   ansible.builtin.assert:
     that:
-      - gateway_tls_final_cert_modulus.stdout == gateway_tls_final_key_modulus.stdout
+      - gateway_tls_final_cert_public_key.stdout == gateway_tls_final_key_public_key.stdout
     fail_msg: "Gateway Certificate와 Private Key가 일치하지 않습니다."
   no_log: true
 
@@ -127,13 +151,13 @@
 
 - name: Gateway Certificate 읽기
   ansible.builtin.slurp:
-    src: "{{ gateway_tls_cert_path }}"
+    src: "{{ gateway_tls_effective_cert_path }}"
   register: gateway_tls_cert_content
   no_log: true
 
 - name: Gateway Private Key 읽기
   ansible.builtin.slurp:
-    src: "{{ gateway_tls_key_path }}"
+    src: "{{ gateway_tls_effective_key_path }}"
   register: gateway_tls_key_content
   no_log: true
 

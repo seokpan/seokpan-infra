@@ -1,0 +1,6 @@
+---
+certbot_python: /usr/bin/python3.12
+certbot_python_version: "3.12.13"
+certbot_venv_dir: /opt/certbot
+certbot_version: "5.8.0"
+certbot_command_path: /usr/local/bin/certbot
