@@ -21,7 +21,10 @@ gateway_tls_key_bits: 2048
 # external_acme: 외부 ACME Client가 발급한 fullchain/key를 검증해 Secret에 반영
 gateway_tls_source: "internal_ca"
 gateway_tls_external_fullchain_path: "/etc/letsencrypt/live/{{ gateway_tls_fqdn }}/fullchain.pem"
+gateway_tls_external_cert_path: "/etc/letsencrypt/live/{{ gateway_tls_fqdn }}/cert.pem"
+gateway_tls_external_chain_path: "/etc/letsencrypt/live/{{ gateway_tls_fqdn }}/chain.pem"
 gateway_tls_external_key_path: "/etc/letsencrypt/live/{{ gateway_tls_fqdn }}/privkey.pem"
+gateway_tls_system_ca_bundle_path: "/etc/pki/tls/certs/ca-bundle.crt"
 
 # Controller에 보관하는 Gateway 전용 Leaf Certificate 작업 경로.
 # CA Private Key는 이 경로로 복사하지 않는다.

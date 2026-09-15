@@ -146,6 +146,81 @@
   no_log: true
 
 # ============================================================
+# 2-1. External ACME Fullchain / System Trust 최종 검증
+# - 실제 Kubernetes TLS Secret 변경 직전에 다시 검증한다.
+# - gateway-certbot-verify production 실행 여부에 의존하지 않는다.
+# ============================================================
+
+- name: External ACME Leaf Certificate 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_external_cert_path }}"
+    follow: true
+  register: gateway_tls_external_cert
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME Chain 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_external_chain_path }}"
+    follow: true
+  register: gateway_tls_external_chain
+  when: gateway_tls_source == 'external_acme'
+
+- name: System CA Bundle 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_system_ca_bundle_path }}"
+    follow: true
+  register: gateway_tls_system_ca_bundle
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME Trust Chain 입력 계약 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_external_cert.stat.exists | default(false)
+      - gateway_tls_external_cert.stat.isreg | default(false)
+      - (gateway_tls_external_cert.stat.pw_name | default('')) == 'root'
+      - gateway_tls_external_chain.stat.exists | default(false)
+      - gateway_tls_external_chain.stat.isreg | default(false)
+      - (gateway_tls_external_chain.stat.pw_name | default('')) == 'root'
+      - gateway_tls_system_ca_bundle.stat.exists | default(false)
+      - gateway_tls_system_ca_bundle.stat.isreg | default(false)
+    fail_msg: >-
+      External ACME cert/chain 또는 System CA Bundle이 준비되지 않았습니다.
+      Kubernetes TLS Secret은 변경하지 않습니다.
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME Fullchain 정합성 검증
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - -c
+      - |
+        set -o pipefail
+        cat "$1" "$2" | cmp -s - "$3"
+      - _
+      - "{{ gateway_tls_external_cert_path }}"
+      - "{{ gateway_tls_external_chain_path }}"
+      - "{{ gateway_tls_external_fullchain_path }}"
+  changed_when: false
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME System Trust Chain 검증
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - verify
+      - -purpose
+      - sslserver
+      - -verify_hostname
+      - "{{ gateway_tls_fqdn }}"
+      - -CAfile
+      - "{{ gateway_tls_system_ca_bundle_path }}"
+      - -untrusted
+      - "{{ gateway_tls_external_chain_path }}"
+      - "{{ gateway_tls_external_cert_path }}"
+  changed_when: false
+  when: gateway_tls_source == 'external_acme'
+
+# ============================================================
 # 3. Kubernetes TLS Secret Desired State 수렴
 # ============================================================
 

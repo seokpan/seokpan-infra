@@ -41,9 +41,9 @@ cd ~/work/seokpan-infra/ansible
 ```
 
 Production TXT Record는 발급 완료 후 제거한다. `gateway_tls` Role은 SAN,
-30일 이상 잔여 유효기간, Fullchain, Root 소유 0600 Private Key와
-Certificate/Key Public Key 일치를 확인한 뒤에만 `application/game-seokpan-tls`
-을 갱신한다.
+30일 이상 잔여 유효기간, Fullchain 정합성, Root 소유 0600 Private Key,
+Certificate/Key Public Key 일치와 System Trust Chain을 확인한 뒤에만
+`application/game-seokpan-tls`을 갱신한다.
 
 ## 4. 실패 시 Internal CA 복구
 
