@@ -1,37 +1,32 @@
 # 작성자: 최유준
-# 작성 날짜: 2026-09-15 (2026-09-15 재설계: kubectl CLI 의존 제거, kubernetes.core만 사용)
+# 작성 날짜: 2026-09-15 (2026-09-15 3차 수정: block/always로 실패 경로 Cleanup 보장)
 #
 # Infra #179 완료 기준 중 미충족 항목(DNS resolve smtp.resend.com → TCP 587 →
 # STARTTLS handshake)을 검증하는 Preflight Role.
 #
-# [재설계 배경] 최초 설계는 kubectl debug로 실제 Alertmanager Pod에 Ephemeral
-# Container를 붙이는 방식이었으나, Ansible Controller에 kubectl CLI가 없어
-# 실패(Errno 2, /home/cyj/seokpan-infra 환경에서 실제 발생 확인)함.
-# kubernetes.core 컬렉션(Python Client, kubectl 불요)만으로 동일한 네트워크
-# 검증을 하기 위해, "실제 운영 Pod에 붙는" 대신 "동일 NetworkPolicy가 적용되는
-# 라벨을 가진 일회성 Job"을 observability namespace에 띄우는 방식으로 전환.
+# [설계 이력]
+# 1) 최초 설계는 kubectl debug로 실제 Alertmanager Pod에 Ephemeral Container를
+#    붙이는 방식이었으나, Ansible Controller에 kubectl CLI가 없어 실패(Errno 2).
+#    kubernetes.core(Python Client, kubectl 불요)만으로 검증하기 위해, 운영 Pod
+#    대신 독립 라벨을 가진 일회성 Job을 observability namespace에 띄우는 방식으로 전환.
+# 2) Job 라벨을 Alertmanager와 동일하게(app.kubernetes.io/name: alertmanager) 두려
+#    했으나, alertmanager-operated Headless Service(Prometheus Operator 자동 생성,
+#    Gossip Mesh용, publishNotReadyAddresses: true)가 그 라벨 하나만으로 Endpoint를
+#    선택하는 구조라 운영 클러스터 Mesh에 끼어들 위험 발견 → app: smtp-preflight
+#    독립 라벨 + 전용 임시 NetworkPolicy(allow-smtp-preflight-egress-smtp) 방식으로 재설계.
+# 3) kind/name만으로 조회·삭제하는 태스크에서 api_version 생략 시 기본값 v1(core
+#    group)로 리졸브되어 NetworkPolicy/Job 조회 실패 발견 → 전체 태스크에 api_version 명시.
+# 4) [PR #189 리뷰 반영] assert(Job 성공 여부, 로그 패턴)가 실패하면 Ansible Play가
+#    그 자리에서 중단되어 뒤에 있던 Job/NetworkPolicy 삭제 태스크에 도달하지 못하는
+#    문제 발견. Job은 ttlSecondsAfterFinished로 자연 정리되지만 NetworkPolicy는
+#    TTL이 없어 검증 실패 시 클러스터에 영구 잔존할 수 있었음. 검증 실패 자체는
+#    여전히 Play 실패로 유지하되, Cleanup만은 성공/실패 무관하게 실행되도록
+#    block/always 구조로 전환.
 #
-# 이 방식의 이점:
-#   - kubectl 완전 불요 (kubernetes.core.k8s / k8s_info / k8s_log만 사용)
-#   - 운영 중인 Alertmanager StatefulSet Pod를 전혀 건드리지 않음
-#     (Ephemeral Container 방식보다도 Blast Radius가 낮음)
-#   - NetworkPolicy는 podSelector(app.kubernetes.io/name: alertmanager) 라벨
-#     기준으로 적용되므로, 이 Job Pod가 같은 라벨을 가지면 실제 운영 Pod와
-#     동일한 Egress(0.0.0.0/0 + TCP 587/465, kube-system DNS 53)를 그대로 적용받음
-#
-# [2026-09-15 실제 클러스터 확인 결과, 라벨 재사용 방식 폐기] observability의
-# alertmanager-operated Service(Headless, publishNotReadyAddresses: true, Prometheus
-# Operator가 자동 생성한 Alertmanager Cluster Mesh/Gossip용, 9094 tcp/udp-mesh)가
-# selector: {app.kubernetes.io/name: alertmanager} 단일 라벨만 요구한다. 이는
-# NetworkPolicy podSelector와 완전히 동일한 라벨이라, Alertmanager와 같은 라벨을
-# 재사용하면 이 Job Pod가 즉시 alertmanager-operated Service의 Endpoint로 잡혀
-# 운영 Alertmanager 클러스터 Mesh에 불필요하게 섞여 들어간다.
-# 따라서 Alertmanager 라벨을 재사용하지 않고, 이 Preflight 전용의 독립 라벨
-# (app: smtp-preflight)과 그 라벨만을 대상으로 하는 임시 NetworkPolicy를 별도로
-# 만들어 기존 allow-alertmanager-egress-smtp와 동일한 Egress 규칙만 복제 적용한다.
-# 검증 목적은 "클러스터 NetworkPolicy가 587 포트를 막지 않는가"이지 Alertmanager
-# Pod 자체가 아니므로, 독립 라벨로도 동일한 검증 목적을 달성할 수 있다.
-# 작업 종료 후 Job과 임시 NetworkPolicy를 모두 삭제한다.
+# [확인 필요] observability namespace의 Alertmanager Service selector는 PR #189
+# 검토 시점(2026-09-15)에 kube-prometheus-stack-alertmanager(alertmanager +
+# app.kubernetes.io/name 복합 라벨 요구)와 alertmanager-operated(app.kubernetes.io/name
+# 단일 라벨) 두 개로 확인됨 — app: smtp-preflight 라벨은 둘 중 어느 것과도 겹치지 않음.
 
 - name: 필수 변수 정의 여부 확인
   ansible.builtin.assert:
@@ -70,9 +65,9 @@
 - name: --check 모드 안내 (이 Role은 --check 미지원, 실제 실행 필요)
   ansible.builtin.debug:
     msg: >-
-      --check 모드에서는 Job 생성/실행과 이후 확인 태스크가 모두 skip됩니다.
-      이 Role은 순수 진단 작업이라 --check 없이 바로 실행하면 됩니다:
-      ansible-playbook alertmanager_smtp_preflight.yml
+      --check 모드에서는 Job/NetworkPolicy 생성과 이후 확인 태스크가 모두
+      skip됩니다. 이 Role은 순수 진단 작업이라 --check 없이 바로 실행하면
+      됩니다: ansible-playbook alertmanager_smtp_preflight.yml
   when: ansible_check_mode
 
 - name: 기존 임시 NetworkPolicy 잔존 여부 확인 (재실행 대비)
@@ -100,171 +95,162 @@
   delegate_to: localhost
   become: false
 
-- name: Preflight 전용 임시 NetworkPolicy 생성
-  # allow-alertmanager-egress-smtp(observability/networkpolicy-observability.yaml
-  # 정책 6)와 동일한 Egress 규칙을 독립 라벨(app: smtp-preflight)에만 복제 적용.
-  # 운영 Alertmanager Pod/Service selector와 절대 겹치지 않는 라벨을 사용.
-  kubernetes.core.k8s:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    state: present
-    definition:
-      apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
-      metadata:
-        name: allow-smtp-preflight-egress-smtp
-        namespace: observability
-      spec:
-        podSelector:
-          matchLabels:
-            app: smtp-preflight
-        policyTypes:
-          - Egress
-        egress:
-          - to:
-              - ipBlock:
-                  cidr: 0.0.0.0/0
-            ports:
-              - protocol: TCP
-                port: 587
-              - protocol: TCP
-                port: 465
-          - to:
-              - namespaceSelector:
-                  matchLabels:
-                    kubernetes.io/metadata.name: kube-system
-            ports:
-              - protocol: UDP
-                port: 53
-              - protocol: TCP
-                port: 53
-  register: preflight_netpol_apply
-  delegate_to: localhost
-  become: false
+# [PR #189 리뷰 반영] NetworkPolicy/Job 생성부터 검증 assert까지를 block으로
+# 묶고, 성공/실패 여부와 무관하게 always에서 Cleanup을 보장한다. always는
+# 에러를 삼키지 않으므로 검증 실패 시 Play는 여전히 실패로 끝난다 — 달라지는
+# 건 "실패해도 Cleanup은 반드시 실행된다"는 점뿐이다.
+- name: SMTP Preflight 검증 (실패해도 Cleanup 보장)
   when: not ansible_check_mode
-
-- name: SMTP Preflight Job 생성 (전용 라벨, 운영 Alertmanager와 분리)
-  kubernetes.core.k8s:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    state: present
-    definition:
-      apiVersion: batch/v1
-      kind: Job
-      metadata:
-        name: alertmanager-smtp-preflight
-        namespace: observability
-      spec:
-        backoffLimit: 0
-        ttlSecondsAfterFinished: 300
-        template:
+  block:
+    - name: Preflight 전용 임시 NetworkPolicy 생성
+      # allow-alertmanager-egress-smtp(observability/networkpolicy-observability.yaml
+      # 정책 6)와 동일한 Egress 규칙을 독립 라벨(app: smtp-preflight)에만 복제 적용.
+      # 운영 Alertmanager Pod/Service selector와 절대 겹치지 않는 라벨을 사용.
+      kubernetes.core.k8s:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
           metadata:
-            labels:
-              app: smtp-preflight
-              job-name: alertmanager-smtp-preflight
+            name: allow-smtp-preflight-egress-smtp
+            namespace: observability
           spec:
-            restartPolicy: Never
-            containers:
-              - name: smtp-preflight
-                image: nicolaka/netshoot
-                command: ["sh", "-c"]
-                args:
-                  - |
-                    set -e
-                    echo "=== DNS ==="
-                    dig +short smtp.resend.com
-                    echo "=== TCP ==="
-                    nc -vz -w 5 smtp.resend.com 587
-                    echo "=== STARTTLS ==="
-                    echo QUIT | openssl s_client -starttls smtp -connect smtp.resend.com:587 -brief
-  register: preflight_job_apply
-  delegate_to: localhost
-  become: false
-  when: not ansible_check_mode
+            podSelector:
+              matchLabels:
+                app: smtp-preflight
+            policyTypes:
+              - Egress
+            egress:
+              - to:
+                  - ipBlock:
+                      cidr: 0.0.0.0/0
+                ports:
+                  - protocol: TCP
+                    port: 587
+                  - protocol: TCP
+                    port: 465
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: kube-system
+                ports:
+                  - protocol: UDP
+                    port: 53
+                  - protocol: TCP
+                    port: 53
+      register: preflight_netpol_apply
 
-- name: Job 완료 대기 (성공/실패 무관, 종료까지)
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    kind: Job
-    api_version: batch/v1
-    namespace: observability
-    name: alertmanager-smtp-preflight
-  register: preflight_job_status
-  until: >
-    (preflight_job_status.resources[0].status.succeeded | default(0)) > 0
-    or (preflight_job_status.resources[0].status.failed | default(0)) > 0
-  retries: 24
-  delay: 5
-  delegate_to: localhost
-  become: false
-  when: not ansible_check_mode
+    - name: SMTP Preflight Job 생성 (전용 라벨, 운영 Alertmanager와 분리)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: alertmanager-smtp-preflight
+            namespace: observability
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              metadata:
+                labels:
+                  app: smtp-preflight
+                  job-name: alertmanager-smtp-preflight
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: smtp-preflight
+                    image: nicolaka/netshoot
+                    command: ["sh", "-c"]
+                    args:
+                      - |
+                        set -e
+                        echo "=== DNS ==="
+                        dig +short smtp.resend.com
+                        echo "=== TCP ==="
+                        nc -vz -w 5 smtp.resend.com 587
+                        echo "=== STARTTLS ==="
+                        echo QUIT | openssl s_client -starttls smtp -connect smtp.resend.com:587 -brief
+      register: preflight_job_apply
 
-- name: Preflight Pod 이름 조회
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    kind: Pod
-    api_version: v1
-    namespace: observability
-    label_selectors:
-      - "job-name=alertmanager-smtp-preflight"
-  register: preflight_pod_lookup
-  delegate_to: localhost
-  become: false
-  when: not ansible_check_mode
+    - name: Job 완료 대기 (성공/실패 무관, 종료까지)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        kind: Job
+        api_version: batch/v1
+        namespace: observability
+        name: alertmanager-smtp-preflight
+      register: preflight_job_status
+      until: >
+        (preflight_job_status.resources[0].status.succeeded | default(0)) > 0
+        or (preflight_job_status.resources[0].status.failed | default(0)) > 0
+      retries: 24
+      delay: 5
 
-- name: Preflight 로그 조회
-  kubernetes.core.k8s_log:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    namespace: observability
-    name: "{{ preflight_pod_lookup.resources[0].metadata.name }}"
-  register: preflight_log
-  delegate_to: localhost
-  become: false
-  when: not ansible_check_mode
+    - name: Preflight Pod 이름 조회
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        kind: Pod
+        api_version: v1
+        namespace: observability
+        label_selectors:
+          - "job-name=alertmanager-smtp-preflight"
+      register: preflight_pod_lookup
 
-- name: Job 성공 여부 확인
-  ansible.builtin.assert:
-    that:
-      - (preflight_job_status.resources[0].status.succeeded | default(0)) > 0
-    fail_msg: >-
-      SMTP Preflight 실패(Job failed). 로그: {{ preflight_log.log | default('로그 조회 실패') }}
-  when: not ansible_check_mode
+    - name: Preflight 로그 조회
+      kubernetes.core.k8s_log:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        namespace: observability
+        name: "{{ preflight_pod_lookup.resources[0].metadata.name }}"
+      register: preflight_log
 
-- name: DNS/TCP/STARTTLS 결과 패턴 확인
-  ansible.builtin.assert:
-    that:
-      - "'=== TCP ===' in preflight_log.log"
-      - "'succeeded' in preflight_log.log or 'open' in preflight_log.log"
-      - "'Verification: OK' in preflight_log.log or 'Verify return code: 0' in preflight_log.log"
-    fail_msg: >-
-      Preflight 로그에서 기대한 성공 패턴을 찾지 못했습니다. 전체 로그: {{ preflight_log.log }}
-  when: not ansible_check_mode
+    - name: Job 성공 여부 확인
+      ansible.builtin.assert:
+        that:
+          - (preflight_job_status.resources[0].status.succeeded | default(0)) > 0
+        fail_msg: >-
+          SMTP Preflight 실패(Job failed). 로그: {{ preflight_log.log | default('로그 조회 실패') }}
 
-- name: 진단 결과 전체 로그 출력
-  ansible.builtin.debug:
-    msg: "{{ preflight_log.log_lines | default(preflight_log.log) }}"
-  when: not ansible_check_mode
+    - name: DNS/TCP/STARTTLS 결과 패턴 확인
+      ansible.builtin.assert:
+        that:
+          - "'=== TCP ===' in preflight_log.log"
+          - "'succeeded' in preflight_log.log or 'open' in preflight_log.log"
+          - "'Verification: OK' in preflight_log.log or 'Verify return code: 0' in preflight_log.log"
+        fail_msg: >-
+          Preflight 로그에서 기대한 성공 패턴을 찾지 못했습니다. 전체 로그: {{ preflight_log.log }}
 
-- name: Preflight Job 정리
-  kubernetes.core.k8s:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    kind: Job
-    api_version: batch/v1
-    namespace: observability
-    name: alertmanager-smtp-preflight
-    state: absent
-    wait: false
-  delegate_to: localhost
-  become: false
-  when: not ansible_check_mode
+    - name: 진단 결과 전체 로그 출력
+      ansible.builtin.debug:
+        msg: "{{ preflight_log.log_lines | default(preflight_log.log) }}"
 
-- name: Preflight 전용 임시 NetworkPolicy 정리
-  kubernetes.core.k8s:
-    kubeconfig: "{{ cluster_kubeconfig }}"
-    kind: NetworkPolicy
-    api_version: networking.k8s.io/v1
-    namespace: observability
-    name: allow-smtp-preflight-egress-smtp
-    state: absent
-    wait: false
-  delegate_to: localhost
-  become: false
-  when: not ansible_check_mode
+  always:
+    # 검증 성공/실패 무관하게 항상 실행. Job/NetworkPolicy가 아직 생성되지
+    # 않은 단계(block 초반 실패)에서도 k8s state:absent는 이미 없는 리소스에
+    # 대해 no-op으로 안전하게 처리되므로 존재 여부 조건 없이 그대로 호출한다.
+    - name: Preflight Job 정리 (always)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        kind: Job
+        api_version: batch/v1
+        namespace: observability
+        name: alertmanager-smtp-preflight
+        state: absent
+        wait: false
+      delegate_to: localhost
+      become: false
+
+    - name: Preflight 전용 임시 NetworkPolicy 정리 (always)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        kind: NetworkPolicy
+        api_version: networking.k8s.io/v1
+        namespace: observability
+        name: allow-smtp-preflight-egress-smtp
+        state: absent
+        wait: false
+      delegate_to: localhost
+      become: false
