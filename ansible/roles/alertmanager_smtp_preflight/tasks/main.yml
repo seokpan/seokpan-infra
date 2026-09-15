@@ -45,6 +45,7 @@
   kubernetes.core.k8s_info:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: Job
+    api_version: batch/v1
     namespace: observability
     name: alertmanager-smtp-preflight
   register: preflight_existing_job
@@ -55,6 +56,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: Job
+    api_version: batch/v1
     namespace: observability
     name: alertmanager-smtp-preflight
     state: absent
@@ -77,6 +79,7 @@
   kubernetes.core.k8s_info:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: NetworkPolicy
+    api_version: networking.k8s.io/v1
     namespace: observability
     name: allow-smtp-preflight-egress-smtp
   register: preflight_existing_netpol
@@ -87,6 +90,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: NetworkPolicy
+    api_version: networking.k8s.io/v1
     namespace: observability
     name: allow-smtp-preflight-egress-smtp
     state: absent
@@ -180,6 +184,7 @@
   kubernetes.core.k8s_info:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: Job
+    api_version: batch/v1
     namespace: observability
     name: alertmanager-smtp-preflight
   register: preflight_job_status
@@ -196,6 +201,7 @@
   kubernetes.core.k8s_info:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: Pod
+    api_version: v1
     namespace: observability
     label_selectors:
       - "job-name=alertmanager-smtp-preflight"
@@ -241,6 +247,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: Job
+    api_version: batch/v1
     namespace: observability
     name: alertmanager-smtp-preflight
     state: absent
@@ -253,6 +260,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ cluster_kubeconfig }}"
     kind: NetworkPolicy
+    api_version: networking.k8s.io/v1
     namespace: observability
     name: allow-smtp-preflight-egress-smtp
     state: absent
