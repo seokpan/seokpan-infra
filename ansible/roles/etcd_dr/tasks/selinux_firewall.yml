@@ -1,0 +1,63 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) SELinux/firewalld 처리 (STEP 8, 1차 구현)
+#          검증 VM 3대 모두 SELinux Enforcing 상태로 확인됨(2026-09-14).
+#          Restore(STEP 10)에서 새 데이터 경로(/var/lib/etcd-dr)와
+#          노드 간 2379/2380 통신이 SELinux/firewalld에 막히지 않도록
+#          1차 구현에서는 permissive/stopped로 전환한다.
+#          2차 보완에서 enforcing 유지 + 필요 포트만 허용하는 방식으로 개선 예정.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14 (버그 수정 — delegate_to/loop 누락으로 loadgen 1대에만
+#            적용되던 문제. groups['dr_isolated_etcd'] 전체 대상으로 수정)
+
+- name: (검증 VM 전체) SELinux 전환 전 상태 조회
+  command: getenforce
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+  register: selinux_before_check
+
+- name: SELinux 전환 전 상태 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_selinux_before: "{{ selinux_before_check.results | map(attribute='stdout') | list }}"
+
+- name: (검증 VM 전체) SELinux permissive로 전환
+  ansible.posix.selinux:
+    policy: targeted
+    state: permissive
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+  register: selinux_result
+
+- name: (검증 VM 전체) firewalld 활성 상태 확인
+  systemd:
+    name: firewalld
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+  register: firewalld_status_check
+
+- name: (검증 VM 전체) firewalld 중지
+  systemd:
+    name: firewalld
+    state: stopped
+    enabled: false
+  delegate_to: "{{ item.item }}"
+  loop: "{{ firewalld_status_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.status is defined
+  register: firewalld_result
+
+- name: SELinux/firewalld 처리 결과 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_selinux_permissive: true
+    dr_firewalld_stopped: true

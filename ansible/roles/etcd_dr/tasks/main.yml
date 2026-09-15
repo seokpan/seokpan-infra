@@ -1,0 +1,33 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02 etcd Snapshot Restore 자동화 기본 단계 오케스트레이션
+#          Safety Guard와 Restore Decision은 메인 Playbook의
+#          별도 Gate 단계에서 실행한다.
+#
+# 최초 작성 시간: 2026-09-14
+# 수정 시간: 2026-09-15 (Safety Guard / Restore Decision 분리)
+
+- name: DR-02 Snapshot 준비 단계
+  block:
+    - import_tasks: deploy_tools.yml
+    - import_tasks: precheck.yml
+    - import_tasks: snapshot.yml
+    - import_tasks: selinux_firewall.yml
+
+  rescue:
+    - set_fact:
+        dr_result: "FAIL"
+        dr_failure_reason: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    - fail:
+        msg: >
+          DR-02 Snapshot 준비 단계가 실패했습니다.
+          실패 작업: {{ dr_failure_reason }}
+
+  always:
+    - debug:
+        msg: >
+          DR-02 Snapshot 준비 단계 결과:
+          {{ dr_result | default('PASS') }}

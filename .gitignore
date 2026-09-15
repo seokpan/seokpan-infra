@@ -111,3 +111,6 @@ service-account*.json
 
 .DS_Store
 Thumbs.db
+
+# DR-02 runtime evidence
+/dr-evidence/

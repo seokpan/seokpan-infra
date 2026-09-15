@@ -1,0 +1,89 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) 설정값 안전 검증 (구 isolation_guard.yml 대체)
+#          네트워크 격리 대신, restore 설정에 운영 자산(IP/data-dir)이
+#          실수로 섞여 들어가는 실제 사고 원인을 직접 검증한다.
+#          Restore(STEP 10) 실행의 필수 선행 조건 — 실패 시 이후 전 단계 중단.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14 (INJECT_FACTS_AS_VARS deprecation 대응 —
+#            ansible_date_time.iso8601 → ansible_facts['date_time']['iso8601'])
+
+- name: restore_member_map에 운영 cp1~3 IP가 섞여 있지 않은지 확인
+  assert:
+    that:
+      - "item not in (restore_member_map.values() | map(attribute='ip') | list)"
+    fail_msg: >
+      restore_member_map에 운영 cp IP({{ item }})가 포함되어 있습니다.
+      설정 오류이므로 restore를 진행하지 않습니다.
+    success_msg: "운영 IP({{ item }}) 미포함 확인"
+  loop: "{{ prod_etcd_ips }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: restore_data_dir이 운영 etcd data-dir과 다른지 확인
+  assert:
+    that:
+      - restore_data_dir != prod_etcd_data_dir
+    fail_msg: >
+      restore_data_dir({{ restore_data_dir }})이 운영 etcd
+      data-dir({{ prod_etcd_data_dir }})과 동일합니다.
+    success_msg: "restore_data_dir 운영과 분리 확인"
+
+- name: restore_cluster_token이 DR 전용 형식인지 확인 (운영 토큰과 혼동 방지)
+  assert:
+    that:
+      - "'etcd-dr-' in restore_cluster_token"
+    fail_msg: "restore_cluster_token 형식이 예상(etcd-dr-*)과 다릅니다."
+    success_msg: "restore_cluster_token 형식 확인"
+
+- name: 운영 Kubernetes API VIP가 restore_member_map에 포함되지 않았는지 확인
+  ansible.builtin.assert:
+    that:
+      - "prod_kubernetes_api_ip not in (restore_member_map.values() | map(attribute='ip') | list)"
+    fail_msg: >
+      restore_member_map에 운영 Kubernetes API VIP
+      ({{ prod_kubernetes_api_ip }})가 포함되어 있습니다.
+      설정 오류이므로 restore를 진행하지 않습니다.
+    success_msg: >
+      운영 Kubernetes API VIP({{ prod_kubernetes_api_ip }}) 미포함 확인
+
+- name: restore_member_map IP가 Inventory와 1:1 일치하는지 확인
+  ansible.builtin.assert:
+    that:
+      - "restore_member_map[item].ip == hostvars[item].ansible_host"
+    fail_msg: >
+      {{ item }}의 restore_member_map IP
+      ({{ restore_member_map[item].ip }})와 Inventory ansible_host
+      ({{ hostvars[item].ansible_host | default('undefined') }})가 일치하지 않습니다.
+      설정 오류이므로 restore를 진행하지 않습니다.
+    success_msg: >
+      {{ item }}의 restore_member_map IP와 Inventory ansible_host 일치 확인
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: restore_member_map IP가 중복되지 않는지 확인
+  ansible.builtin.assert:
+    that:
+      - "(restore_member_map.values() | map(attribute='ip') | list | unique | length) == (restore_member_map | length)"
+    fail_msg: >
+      restore_member_map에 중복 IP가 존재합니다.
+      설정 오류이므로 restore를 진행하지 않습니다.
+    success_msg: "restore_member_map IP 중복 없음 확인"
+
+- name: restore_member_map member name이 중복되지 않는지 확인
+  ansible.builtin.assert:
+    that:
+      - "(restore_member_map.values() | map(attribute='name') | list | unique | length) == (restore_member_map | length)"
+    fail_msg: >
+      restore_member_map에 중복 member name이 존재합니다.
+      설정 오류이므로 restore를 진행하지 않습니다.
+    success_msg: "restore_member_map member name 중복 없음 확인"
+
+
+- name: Config Guard 통과 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_config_guard_passed: true
+    dr_config_guard_checked_at: "{{ ansible_facts['date_time']['iso8601'] }}"

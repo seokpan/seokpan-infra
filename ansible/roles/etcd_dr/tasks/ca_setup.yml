@@ -1,0 +1,153 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) kube-apiserver 검증용 self-signed CA 및 서버 인증서
+#          생성 (STEP 13, A안 — loadgen 로컬 상주, git 커밋 금지 대상).
+#          이미 생성되어 있으면 재생성하지 않는다(idempotent, CA 재사용).
+#          실제 운영 CA와는 무관한 테스트 전용 CA이며, 이 검증 스코프에서는
+#          #178(운영 PKI 기반 복구)과 달리 새로 발급해도 무방하다.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14
+
+- name: CA 디렉토리 존재 확인
+  file:
+    path: "{{ dr_ca_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: 기존 CA 존재 여부 확인
+  stat:
+    path: "{{ dr_ca_dir }}/ca.crt"
+  register: dr_ca_check
+
+- name: CA 개인키 생성 (최초 1회)
+  command: >
+    openssl genrsa -out {{ dr_ca_dir }}/ca.key 2048
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: CA 인증서 생성 (최초 1회, self-signed, 10년)
+  command: >
+    openssl req -x509 -new -nodes
+    -key {{ dr_ca_dir }}/ca.key
+    -subj "/CN=dr-verification-ca"
+    -days 3650
+    -out {{ dr_ca_dir }}/ca.crt
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: apiserver 서버 키 생성 (최초 1회)
+  command: >
+    openssl genrsa -out {{ dr_ca_dir }}/apiserver.key 2048
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: apiserver 인증서 SAN 설정 파일 생성 (최초 1회)
+  copy:
+    dest: "{{ dr_ca_dir }}/apiserver-san.cnf"
+    mode: "0600"
+    content: |
+      [req]
+      distinguished_name = req_distinguished_name
+      req_extensions = v3_req
+      prompt = no
+
+      [req_distinguished_name]
+      CN = kube-apiserver
+
+      [v3_req]
+      subjectAltName = @alt_names
+
+      [alt_names]
+      DNS.1 = kubernetes
+      DNS.2 = kubernetes.default
+      DNS.3 = kubernetes.default.svc
+      DNS.4 = kubernetes.default.svc.cluster.local
+      DNS.5 = localhost
+      IP.1 = 127.0.0.1
+      IP.2 = {{ dr_my_member.ip | default(restore_member_map[inventory_hostname].ip) }}
+      IP.3 = 10.96.0.1
+  when: not dr_ca_check.stat.exists
+
+- name: apiserver 인증서 서명 요청(CSR) 생성 (최초 1회)
+  command: >
+    openssl req -new
+    -key {{ dr_ca_dir }}/apiserver.key
+    -out {{ dr_ca_dir }}/apiserver.csr
+    -config {{ dr_ca_dir }}/apiserver-san.cnf
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: apiserver 인증서 발급 (CA 서명, 최초 1회)
+  command: >
+    openssl x509 -req
+    -in {{ dr_ca_dir }}/apiserver.csr
+    -CA {{ dr_ca_dir }}/ca.crt
+    -CAkey {{ dr_ca_dir }}/ca.key
+    -CAcreateserial
+    -out {{ dr_ca_dir }}/apiserver.crt
+    -days 3650
+    -extensions v3_req
+    -extfile {{ dr_ca_dir }}/apiserver-san.cnf
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: ServiceAccount 서명 키 생성 (최초 1회)
+  command: >
+    openssl genrsa -out {{ dr_ca_dir }}/sa.key 2048
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: ServiceAccount 공개키 추출 (최초 1회)
+  command: >
+    openssl rsa -in {{ dr_ca_dir }}/sa.key -pubout -out {{ dr_ca_dir }}/sa.pub
+  when: not dr_ca_check.stat.exists
+  changed_when: true
+
+- name: admin client 인증서 존재 여부 확인
+  stat:
+    path: "{{ dr_ca_dir }}/admin.crt"
+  register: dr_admin_cert_check
+
+- name: admin client 키 생성 (없을 때만)
+  command: >
+    openssl genrsa -out {{ dr_ca_dir }}/admin.key 2048
+  when: not dr_admin_cert_check.stat.exists
+  changed_when: true
+
+- name: admin client 인증서 CSR 생성 (없을 때만, system:masters 그룹)
+  command: >
+    openssl req -new
+    -key {{ dr_ca_dir }}/admin.key
+    -subj "/CN=dr-admin/O=system:masters"
+    -out {{ dr_ca_dir }}/admin.csr
+  when: not dr_admin_cert_check.stat.exists
+  changed_when: true
+
+- name: admin client 인증서 발급 (없을 때만, CA 서명)
+  command: >
+    openssl x509 -req
+    -in {{ dr_ca_dir }}/admin.csr
+    -CA {{ dr_ca_dir }}/ca.crt
+    -CAkey {{ dr_ca_dir }}/ca.key
+    -CAcreateserial
+    -out {{ dr_ca_dir }}/admin.crt
+    -days 3650
+  when: not dr_admin_cert_check.stat.exists
+  changed_when: true
+
+- name: CA/인증서 파일 권한 고정
+  file:
+    path: "{{ dr_ca_dir }}/{{ item }}"
+    mode: "0600"
+  loop:
+    - ca.key
+    - apiserver.key
+    - sa.key
+    - admin.key
+
+- name: CA 준비 완료 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_ca_ready: true
+    dr_ca_reused: "{{ dr_ca_check.stat.exists }}"

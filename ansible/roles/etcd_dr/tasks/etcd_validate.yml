@@ -1,0 +1,93 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) 복구된 3-member etcd Cluster/Quorum 검증 (STEP 11)
+#          member=3, health=3/3, leader 존재, quorum 정상을 확인한다.
+#          이 단계 실패 시 이후 kube-apiserver(STEP 12) 단계로 진행하지 않는다
+#          (main.yml의 block/rescue 구조에 의해 자동 처리됨).
+#          loadgen(대표 노드, dr_isolated_etcd[0])에서 실행되며 --cluster
+#          옵션으로 3대 전체 endpoint를 함께 조회한다.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14
+
+- name: 대표 노드(loadgen)의 etcd client endpoint 결정
+  set_fact:
+    dr_validate_endpoint: "http://{{ restore_member_map[groups['dr_isolated_etcd'][0]].ip }}:{{ etcd_client_port }}"
+
+- name: (loadgen) 3-member 전체 endpoint health 확인
+  command: >
+    {{ etcd_tools_path }}/etcdctl
+    --endpoints={{ dr_validate_endpoint }}
+    endpoint health --cluster
+    --write-out=json
+  delegate_to: "{{ groups['dr_isolated_etcd'][0] }}"
+  run_once: true
+  changed_when: false
+  register: dr_endpoint_health_raw
+
+- name: endpoint health 결과 파싱
+  set_fact:
+    dr_endpoint_health: "{{ dr_endpoint_health_raw.stdout | from_json }}"
+
+- name: 3-member 전체가 healthy 상태인지 확인
+  assert:
+    that:
+      - dr_endpoint_health | length == 3
+      - dr_endpoint_health | selectattr('health', 'equalto', true) | list | length == 3
+    fail_msg: >
+      etcd endpoint health 3/3 미충족 —
+      {{ dr_endpoint_health | selectattr('health', 'equalto', false) | map(attribute='endpoint') | list }}
+      노드가 unhealthy 상태입니다.
+    success_msg: "etcd endpoint health 3/3 정상 확인"
+
+- name: (loadgen) member list 조회
+  command: >
+    {{ etcd_tools_path }}/etcdctl
+    --endpoints={{ dr_validate_endpoint }}
+    member list --write-out=json
+  delegate_to: "{{ groups['dr_isolated_etcd'][0] }}"
+  run_once: true
+  changed_when: false
+  register: dr_member_list_raw
+
+- name: member list 결과 파싱
+  set_fact:
+    dr_member_list: "{{ (dr_member_list_raw.stdout | from_json).members }}"
+
+- name: member 수가 정확히 3인지 확인
+  assert:
+    that:
+      - dr_member_list | length == 3
+    fail_msg: "etcd member 수가 3이 아닙니다: {{ dr_member_list | length }}개 확인됨"
+    success_msg: "etcd member 3개 확인 완료"
+
+- name: (loadgen) endpoint status 조회 (leader/quorum 확인용)
+  command: >
+    {{ etcd_tools_path }}/etcdctl
+    --endpoints={{ dr_validate_endpoint }}
+    endpoint status --cluster --write-out=json
+  delegate_to: "{{ groups['dr_isolated_etcd'][0] }}"
+  run_once: true
+  changed_when: false
+  register: dr_endpoint_status_raw
+
+- name: endpoint status 결과 파싱
+  set_fact:
+    dr_endpoint_status: "{{ dr_endpoint_status_raw.stdout | from_json }}"
+
+- name: leader가 정확히 1개 존재하는지 확인 (quorum 정상 판단 근거)
+  assert:
+    that:
+      - dr_endpoint_status | map(attribute='Status.leader') | unique | list | length == 1
+      - (dr_endpoint_status | map(attribute='Status.leader') | unique | list)[0] != "0"
+    fail_msg: >
+      leader가 정상적으로 선출되지 않았습니다 —
+      각 노드가 보고한 leader ID: {{ dr_endpoint_status | map(attribute='Status.leader') | list }}
+    success_msg: "leader 선출 및 quorum 정상 확인"
+
+- name: STEP 11 검증 결과 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_etcd_validate_passed: true
+    dr_etcd_member_count: "{{ dr_member_list | length }}"
+    dr_etcd_leader_id: "{{ (dr_endpoint_status | map(attribute='Status.leader') | unique | list)[0] }}"
