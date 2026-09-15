@@ -5,7 +5,10 @@
 # Credential. GitOps(seokpan-gitops)는 Receiver의 host/port/from/username(고정 문자열
 # "resend")만 소유하고, 이 API Key(비밀값)만 Ansible이 별도 Secret으로 주입한다
 # (jenkins_secrets의 harbor-api-credential과 동일 소유권 분리 패턴, 06 문서 4.1 기준).
-# GitOps configSecret은 이 Secret의 "이름"만 참조한다.
+# GitOps는 이 Secret을 AlertmanagerSpec.secrets로 마운트하여 참조한다
+# (/etc/alertmanager/secrets/alertmanager-smtp-credential/smtp-password).
+# 기존 Alertmanager 설정 Secret(alertmanager-config)이 alertmanager.yaml을
+# 계속 소유하며, 이 Credential Secret으로 대체되지 않는다.
 #
 # [실행 전제] observability Namespace 및 kube-prometheus-stack Alertmanager StatefulSet은
 # 이미 배포·가동 중(alertmanager-kube-prometheus-stack-alertmanager-0, 8d 기준 Running)이므로
