@@ -876,7 +876,15 @@ def engine(root,pb,args,secrets,private,mode):
                         # Only an explicitly written check_mode: false is an override.
                         explicit_check=explicit_value(original,'check_mode')
                         if explicit_check is not Sentinel and tpl.template(explicit_check) is False and not risk:
-                            if not reviewed_check_override(root,original): unknown.append(t.get_path())
+                            if not reviewed_check_override(root,original):
+                                data = original.get_ds() if hasattr(original, 'get_ds') else None
+                                task_name = data.get('name') if isinstance(data, dict) else None
+                                task_action = getattr(original, 'action', None) or 'unknown'
+                                unknown.append(
+                                    f"{original.get_path()} | "
+                                    f"Task={task_name or '(이름 없음)'} | "
+                                    f"Module={task_action}"
+                                )
                         # A Handler is only a potential path until Ansible actually
                         # notifies it. Never use it to request a credential in probe.
                         if is_handler: conn.close(); continue
@@ -961,7 +969,11 @@ def main():
     for r in plan['potential_handlers']:
         print('잠재 Handler 구조 :',r['host'],'/',r['delegate'] or '없음',
               '/',r['connection'],'/',r['user'],'/ Become',r['become'],'→',r['become_user'])
-    if plan['unknown_check']: print('Check 판정 불가   :',len(plan['unknown_check']),'개 Task (위험 확정으로 분류하지 않음)')
+    if plan['unknown_check']:
+        print('Check 판정 불가   :', len(plan['unknown_check']), '개 Task (미검토 check_mode:false)')
+        for item in plan['unknown_check']:
+            print('  -', item)
+        print('조치              : 위 Task의 실제 동작을 사람이 검토한 뒤 안전한 Task만 Evidence에 등록해야 합니다.')
     if inspect:
         print('접속 상태         : 검사 안 함 (--inspect-only)')
         print('Vault 인증        :','필요·검증 완료' if auth_state['vault_required'] else '불필요')
