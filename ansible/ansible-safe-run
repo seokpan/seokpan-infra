@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# s.sh v2.1: native Ansible adapter, validated against ansible-core 2.20.8.
+# ansible-safe-run v2.1: native Ansible adapter, validated against ansible-core 2.20.8.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
-    printf '%s\n' 'source로 실행하지 마세요. ./s.sh ... 로 실행하세요.' >&2
+    printf '%s\n' 'source로 실행하지 마세요. ./ansible-safe-run ... 로 실행하세요.' >&2
     return 2
 fi
 set +x
 set -Eeuo pipefail
 usage() {
-    printf '%s\n' '사용법: ./s.sh <Playbook> [Ansible 옵션]' \
-      '--inspect-only: 접속/Check/적용 없이 Ansible 해석만 (Vault 입력 가능)' \
-      '--secret-extra-vars: 비표시 JSON 입력. 비밀 -e 대신 사용'
+    printf '%s\n' '사용법: ./ansible-safe-run <Playbook> [Ansible 옵션]' \
+      '--inspect-only: 접속/Check/적용 없이 Ansible 해석만 수행 (필요한 Vault Credential은 Kernel Keyring에서 자동 사용)' \
+      '--secret-extra-vars: 비표시 JSON 입력. 민감한 값을 -e로 전달하지 말고 이 옵션을 사용'
 }
 if (( $# == 0 )); then usage; exit 2; fi
 if [[ $1 == -h || $1 == --help ]]; then usage; exit 0; fi
@@ -322,13 +322,13 @@ def validate_execution_user():
         stop('허용된 일반 계정(ansible/jth/ksh/cyj)으로 직접 실행해야 합니다.')
 
     if os.getresuid()!=(uid,uid,uid):
-        stop('sudo/setuid 형태로 s.sh를 실행할 수 없습니다.')
+        stop('sudo/setuid 형태로 ansible-safe-run을 실행할 수 없습니다.')
 
     if os.getgid()!=os.getegid():
-        stop('실제 GID와 유효 GID가 다른 상태에서는 s.sh를 실행할 수 없습니다.')
+        stop('실제 GID와 유효 GID가 다른 상태에서는 ansible-safe-run을 실행할 수 없습니다.')
 
     if any(name.startswith('SUDO_') for name in os.environ):
-        stop('sudo를 통한 s.sh 실행은 허용하지 않습니다.')
+        stop('sudo를 통한 ansible-safe-run 실행은 허용하지 않습니다.')
 
     try:
         account=pwd.getpwuid(uid)
@@ -431,7 +431,7 @@ def supply_credential(kind):
 
 def enforce_playbook_policy(name):
     if name in UNSUPPORTED_SPECIAL_TESTS:
-        stop('특수 CA mutation 테스트는 generic s.sh에서 실행할 수 없습니다.')
+        stop('특수 CA mutation 테스트는 generic ansible-safe-run에서 실행할 수 없습니다.')
     if name in MANUAL_ONLY:
         stop('DB Operator Playbook은 tools/db-operator-login의 수동 --ask-vault-pass 경로를 사용해야 합니다.')
 def cancel(sig, frame):
@@ -569,7 +569,7 @@ def worker(fn):
         try: response={'ok':True,'data':fn()}
         except NeedVault: response={'need_vault':True}
         except Stop as ex: response={'error':str(ex)}
-        except BaseException: response={'error':'Ansible 해석/검증 실패. 상세 값은 비밀 보호를 위해 숨깁니다.'}
+        except BaseException: response={'error':'Ansible 해석/검증 실패. 상세 값은 민감 정보 보호를 위해 숨깁니다.'}
         with os.fdopen(w,'w') as pipe: json.dump(response,pipe)
         os._exit(0)
     CHILD=pid; os.close(w)
@@ -926,7 +926,7 @@ def main():
     enforce_playbook_policy(pb.name)
     secrets={}; private={}; auth_state={'vault_required':False}
     if private_prompt:
-        private=json.loads(prompt('비밀 추가 변수 JSON (표시/저장 안 함): ',True))
+        private=json.loads(prompt('민감한 추가 변수 JSON (표시/저장 안 함): ',True))
         if not isinstance(private,dict): stop('JSON 객체가 필요합니다.')
         for key in private: validate_var_key(str(key),secret_input=True)
     os.chdir(root)
@@ -1013,7 +1013,7 @@ if __name__=='__main__':
     except KeyboardInterrupt:
         print('중단했습니다. 적용 중이었다면 이미 발생한 변경은 자동 복구되지 않습니다.',file=sys.stderr); raise SystemExit(130)
     except Exception:
-        print('중단: 입력/환경/해석 오류. 비밀 보호를 위해 상세 값은 출력하지 않습니다.',file=sys.stderr); raise SystemExit(2)
+        print('중단: 입력/환경/해석 오류. 민감 정보 보호를 위해 상세 값은 출력하지 않습니다.',file=sys.stderr); raise SystemExit(2)
 PYTHON
 exec "$root/.venv/bin/python" -I -c "$runner_code" "$root" < <(printf '%s\0' "${args[@]}")
 
