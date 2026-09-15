@@ -1,0 +1,139 @@
+# 작성자: 최유준
+# 작성 날짜: 2026-09-15
+#
+# Infra #179 완료 기준 중 미충족 항목(DNS resolve smtp.resend.com → TCP 587 →
+# STARTTLS handshake)을 검증하는 Preflight Role. #179를 닫았던 PR 리뷰에서
+# "Secret 공급만 범위이며 Preflight는 별도"로 정리된 후속 작업.
+#
+# [설계 근거] Alertmanager 공식 Image(prom/alertmanager)는 busybox 기반이라
+# dig/nc/openssl 등 진단 도구가 없다. 대신 실제 운영 Alertmanager Pod와
+# 동일한 Pod 네트워크 네임스페이스(= 동일 Pod IP, 동일 Calico NetworkPolicy
+# 적용 대상)를 공유하는 Ephemeral Container(kubectl debug --target)를 붙여서
+# 검증한다. 이렇게 해야 실제 운영 시 Alertmanager가 겪는 NetworkPolicy
+# (0.0.0.0/0 + TCP 587 only) 조건을 그대로 재현해서 확인할 수 있다.
+#
+# [확인 필요] observability/networkpolicy-observability.yaml의 podSelector가
+# Alertmanager StatefulSet Pod label과 정확히 매칭되는지 실행 전 대조 필요.
+# Ephemeral Container는 대상 Pod의 네트워크 네임스페이스를 그대로 쓰므로
+# 이론상 문제없지만, 팀 원칙(단독 결정 지양)에 따라 실제 정책 파일로 재확인할 것.
+
+- name: 대상 Alertmanager Pod 존재 확인
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    kind: Pod
+    namespace: observability
+    name: alertmanager-kube-prometheus-stack-alertmanager-0
+  register: alertmanager_pod_info
+  delegate_to: localhost
+  become: false
+
+- name: Alertmanager Pod 미존재 시 중단
+  ansible.builtin.assert:
+    that:
+      - alertmanager_pod_info.resources | length > 0
+    fail_msg: "alertmanager-kube-prometheus-stack-alertmanager-0 Pod를 찾을 수 없습니다. namespace/이름 재확인 필요"
+
+# kubectl debug는 kubernetes.core 표준 모듈이 아니라 kubectl 바이너리를 직접
+# 호출한다 (Ansible Controller에 kubectl 설치 및 KUBECONFIG 접근 전제).
+# Ephemeral Container는 비동기로 뜨므로 exec 전 Ready 대기가 필요하다.
+- name: 진단용 Ephemeral Container(netshoot) 연결
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig {{ cluster_kubeconfig }} debug
+      -n observability alertmanager-kube-prometheus-stack-alertmanager-0
+      --image=nicolaka/netshoot
+      --target=alertmanager
+      --container=smtp-preflight
+      -- sleep 300
+  register: preflight_debug_container_launch
+  changed_when: true
+  delegate_to: localhost
+  become: false
+
+- name: Ephemeral Container Running 상태 대기
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    kind: Pod
+    namespace: observability
+    name: alertmanager-kube-prometheus-stack-alertmanager-0
+  register: preflight_pod_status
+  until: >
+    preflight_pod_status.resources[0].status.ephemeralContainerStatuses
+    | default([])
+    | selectattr('name', 'equalto', 'smtp-preflight')
+    | selectattr('state.running', 'defined')
+    | list
+    | length > 0
+  retries: 12
+  delay: 5
+  delegate_to: localhost
+  become: false
+
+- name: DNS resolve 확인 (smtp.resend.com)
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig {{ cluster_kubeconfig }} exec
+      -n observability alertmanager-kube-prometheus-stack-alertmanager-0
+      -c smtp-preflight --
+      dig +short smtp.resend.com
+  register: preflight_dns_result
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: DNS resolve 결과 확인
+  ansible.builtin.assert:
+    that:
+      - preflight_dns_result.stdout | trim | length > 0
+    fail_msg: "smtp.resend.com DNS resolve 실패 — stdout 비어있음: {{ preflight_dns_result.stdout }}"
+
+- name: TCP 587 연결 확인
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig {{ cluster_kubeconfig }} exec
+      -n observability alertmanager-kube-prometheus-stack-alertmanager-0
+      -c smtp-preflight --
+      nc -vz -w 5 smtp.resend.com 587
+  register: preflight_tcp_result
+  changed_when: false
+  failed_when: preflight_tcp_result.rc != 0
+  delegate_to: localhost
+  become: false
+
+- name: STARTTLS handshake 확인
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig {{ cluster_kubeconfig }} exec
+      -n observability alertmanager-kube-prometheus-stack-alertmanager-0
+      -c smtp-preflight --
+      sh -c "echo QUIT | openssl s_client -starttls smtp -connect smtp.resend.com:587 -brief"
+  register: preflight_starttls_result
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: STARTTLS handshake 결과 확인 (인증서 검증 성공 여부)
+  ansible.builtin.assert:
+    that:
+      - "'Verification: OK' in preflight_starttls_result.stdout or 'Verify return code: 0' in preflight_starttls_result.stdout"
+    fail_msg: >-
+      STARTTLS handshake 실패 또는 인증서 검증 실패.
+      출력: {{ preflight_starttls_result.stdout }} / stderr: {{ preflight_starttls_result.stderr }}
+
+- name: 진단 결과 요약 출력
+  ansible.builtin.debug:
+    msg:
+      dns: "{{ preflight_dns_result.stdout_lines }}"
+      tcp_rc: "{{ preflight_tcp_result.rc }}"
+      starttls_ok: true
+
+# Ephemeral Container는 Pod 삭제 전까지 남아있고 재시작되지 않지만 리소스
+# 사용량이 낮은 sleep 프로세스라 운영에 영향 없음. 다만 흔적을 남기지 않으려면
+# 검증 완료 후 Alertmanager Pod를 재시작(StatefulSet 특성상 재생성)해
+# Ephemeral Container를 제거하는 것을 권장 — 별도 승인 후 진행.
+- name: 진단 완료 안내 (Ephemeral Container 정리는 별도 승인 필요)
+  ansible.builtin.debug:
+    msg: >-
+      Preflight 통과. smtp-preflight Ephemeral Container는 Pod 재시작 전까지
+      잔존합니다. 제거하려면 Alertmanager Pod 재시작이 필요하며 이는 별도
+      영향평가/승인 대상입니다 (즉시 자동 실행하지 않음).
