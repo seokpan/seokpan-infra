@@ -1,0 +1,51 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) 실행 전 Runtime/환경 사전 점검 (STEP 1)
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14
+
+- name: etcd-tools 바이너리 존재 확인 (tarball 반입 후 loadgen 로컬 경로)
+  stat:
+    path: "{{ etcd_tools_path }}/{{ item }}"
+  register: etcd_tool_stat
+  loop:
+    - etcd
+    - etcdctl
+    - etcdutl
+
+- name: etcd-tools 바이너리 누락 시 즉시 중단
+  fail:
+    msg: >
+      {{ etcd_tools_path }}/{{ item.item }} 이(가) 존재하지 않습니다.
+      tarball 반입 시 etcd-tools 바이너리가 누락되었는지 확인하세요.
+  when: not item.stat.exists
+  loop: "{{ etcd_tool_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: etcdctl / etcdutl 버전 확인
+  command: "{{ etcd_tools_path }}/{{ item }} version"
+  register: etcd_tool_version
+  changed_when: false
+  loop:
+    - etcdctl
+    - etcdutl
+
+- name: 버전 확인 결과 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_precheck_versions: "{{ etcd_tool_version.results | map(attribute='stdout') | list }}"
+
+- name: Restore data-dir 상위 경로 존재 확인 (없으면 생성)
+  file:
+    path: "{{ restore_data_dir | dirname }}"
+    state: directory
+    mode: "0700"
+
+- name: 격리 인벤토리 그룹 멤버 확인 (dr_isolated_etcd 3-node)
+  assert:
+    that:
+      - "groups['dr_isolated_etcd'] | length == 3"
+    fail_msg: "dr_isolated_etcd 그룹이 3-node가 아닙니다. inventory/dr_isolated.yml 확인 필요."
+    success_msg: "격리 인벤토리 3-node 확인 완료"

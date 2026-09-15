@@ -1,0 +1,21 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) 격리 검증용 신규 VM 인벤토리 (Bridged, 10.1.93.95~97)
+#          운영 hosts.yml과 물리적으로 분리된 별도 파일로 유지
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14 (host-only/local 실행 모델 → bridged/SSH 직접 관리 모델로 전환)
+
+all:
+  children:
+    dr_isolated_etcd:
+      hosts:
+        loadgen:
+          ansible_host: 10.1.93.95
+        loadgen2:
+          ansible_host: 10.1.93.96
+        loadgen3:
+          ansible_host: 10.1.93.97
+      vars:
+        ansible_user: root
