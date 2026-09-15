@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+environment="${1:-}"
+fqdn='game.seokpan.soldesk.store'
+
+case "$environment" in
+  staging) config_dir='/etc/letsencrypt-staging' ;;
+  production) config_dir='/etc/letsencrypt' ;;
+  *)
+    echo 'USAGE: sudo gateway-certbot-verify staging|production' >&2
+    exit 2
+    ;;
+esac
+
+live="$config_dir/live/$fqdn"
+cert="$live/cert.pem"
+chain="$live/chain.pem"
+fullchain="$live/fullchain.pem"
+key="$live/privkey.pem"
+
+for file in "$cert" "$chain" "$fullchain" "$key"; do
+  [[ -r "$file" ]] || {
+    echo "ERROR: 인증서 입력을 읽을 수 없습니다: $file" >&2
+    exit 1
+  }
+done
+
+[[ "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$fullchain")" -ge 2 ]]
+openssl x509 -in "$cert" -noout -checkhost "$fqdn"
+
+cert_key=$(
+  openssl x509 -in "$cert" -pubkey -noout |
+    openssl pkey -pubin -outform DER |
+    sha256sum |
+    cut -d' ' -f1
+)
+private_key=$(
+  openssl pkey -in "$key" -pubout -outform DER |
+    sha256sum |
+    cut -d' ' -f1
+)
+[[ "$cert_key" == "$private_key" ]]
+
+if [[ "$environment" == 'production' ]]; then
+  openssl verify -purpose sslserver -verify_hostname "$fqdn" \
+    -CAfile /etc/pki/tls/certs/ca-bundle.crt -untrusted "$chain" "$cert"
+  not_after=$(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2-)
+  [[ "$(date -u -d "$not_after" +%s)" -gt "$(date -u -d '2026-10-26 23:59:59 UTC' +%s)" ]]
+fi
+
+openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256
+echo "GATEWAY_ACME_CERTIFICATE_VERIFY_PASS=$environment"

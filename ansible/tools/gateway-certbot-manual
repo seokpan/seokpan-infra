@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+environment="${1:-}"
+email="${2:-}"
+fqdn='game.seokpan.soldesk.store'
+certbot='/opt/certbot/bin/certbot'
+
+if [[ "$(hostname -s)" != 'ansible' ]] || [[ "$(id -u)" -ne 0 ]]; then
+  echo 'ERROR: Ansible Controller에서 root 권한으로 실행해야 합니다.' >&2
+  exit 1
+fi
+
+if [[ "$environment" != 'staging' && "$environment" != 'production' ]]; then
+  echo 'USAGE: sudo gateway-certbot-manual staging|production EMAIL' >&2
+  exit 2
+fi
+
+if [[ -z "$email" || "$email" != *@* ]]; then
+  echo 'ERROR: ACME 알림용 Email이 필요합니다.' >&2
+  exit 2
+fi
+
+if [[ ! -x "$certbot" ]]; then
+  echo 'ERROR: /opt/certbot Certbot이 설치되지 않았습니다.' >&2
+  exit 1
+fi
+
+args=(
+  certonly
+  --manual
+  --preferred-challenges dns
+  --agree-tos
+  --no-eff-email
+  --email "$email"
+  --cert-name "$fqdn"
+  --key-type ecdsa
+  --domain "$fqdn"
+)
+
+if [[ "$environment" == 'staging' ]]; then
+  args+=(
+    --test-cert
+    --config-dir /etc/letsencrypt-staging
+    --work-dir /var/lib/letsencrypt-staging
+    --logs-dir /var/log/letsencrypt-staging
+  )
+fi
+
+exec "$certbot" "${args[@]}"
