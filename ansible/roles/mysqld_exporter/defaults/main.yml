@@ -1,0 +1,50 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: mysqld_exporter role default variables
+#
+# Prometheus mysqld_exporter 공식 릴리스 기준.
+# MariaDB >= 10.3 지원 — 현재 프로젝트 MariaDB 11.8.9 호환 범위.
+# 대상: mariadb-01/02의 CentOS Stream 9 Guest VM.
+#
+# 계정은 실제 Master에서만 생성하고 MariaDB replication으로 Replica에 반영한다.
+# exporter_svc_password는 inventory/group_vars/all/vault.yml에서 제공한다.
+
+mysqld_exporter_version: "0.20.0"
+
+mysqld_exporter_archive: "mysqld_exporter-{{ mysqld_exporter_version }}.linux-amd64.tar.gz"
+
+mysqld_exporter_download_url: >-
+  https://github.com/prometheus/mysqld_exporter/releases/download/v{{ mysqld_exporter_version }}/{{ mysqld_exporter_archive }}
+
+# 2026-08-13 공식 GitHub Release 기준 SHA256
+mysqld_exporter_archive_sha256: "5773496e9962ca3817b3599fe4d74f218c95c1295eb2a742462df8e035fe51bd"
+
+mysqld_exporter_cache_dir: "/var/cache/seokpan/mysqld_exporter/{{ mysqld_exporter_version }}"
+mysqld_exporter_install_path: "/usr/local/bin/mysqld_exporter"
+
+mysqld_exporter_user: "mysqld_exporter"
+mysqld_exporter_group: "mysqld_exporter"
+
+mysqld_exporter_listen_address: "0.0.0.0:9104"
+
+mysqld_exporter_config_dir: "/etc/mysqld_exporter"
+mysqld_exporter_my_cnf: "{{ mysqld_exporter_config_dir }}/.my.cnf"
+
+mysqld_exporter_db_user: "exporter_svc"
+mysqld_exporter_db_host: "127.0.0.1"
+mysqld_exporter_db_port: 3306
+
+mysqld_exporter_max_user_connections: 3
+
+# mysqld_exporter DB 계정 권한.
+# MariaDB 11.8에서는 REPLICATION CLIENT가
+# SHOW GRANTS에서 BINLOG MONITOR로 표시될 수 있다.
+mysqld_exporter_db_priv: "*.*:PROCESS,REPLICATION CLIENT,SLAVE MONITOR,SELECT"
+
+# exporter 계정 생성 시 사용할 MariaDB Unix socket
+mysqld_exporter_admin_socket: "/var/lib/mysql/mysql.sock"
+
+# MaxScale을 통해 현재 Master를 판별한다.
+mysqld_exporter_master_delegate_host: "maxscale-01"

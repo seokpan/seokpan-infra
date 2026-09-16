@@ -1,0 +1,37 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: mysqld_exporter 전용 DB 계정 생성 및 최소 권한 부여
+#
+# - 실제 Master에서만 실행
+# - 계정 DDL은 MariaDB replication을 통해 Replica에 반영
+# - exporter는 각 DB Guest VM에서 localhost(127.0.0.1)로 접속
+# - update_password: on_create → 기존 계정 비밀번호를 덮어쓰지 않음
+# - 비밀번호는 no_log로 보호
+
+- name: exporter_svc 계정 생성 (mysqld_exporter 전용)
+  ansible.mariadb.mariadb_user:
+    name: "{{ mysqld_exporter_db_user }}"
+    host: "{{ mysqld_exporter_db_host }}"
+    password: "{{ exporter_svc_password }}"
+    update_password: on_create
+    priv: "{{ mysqld_exporter_db_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysqld_exporter_admin_socket }}"
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
+  no_log: true
+
+- name: exporter_svc MAX_USER_CONNECTIONS 설정
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mysqld_exporter_admin_socket }}"
+    query:
+      - >-
+        ALTER USER '{{ mysqld_exporter_db_user }}'@'{{ mysqld_exporter_db_host }}'
+        WITH MAX_USER_CONNECTIONS {{ mysqld_exporter_max_user_connections }}
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
+  changed_when: false
+  no_log: true

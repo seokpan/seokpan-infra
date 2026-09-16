@@ -1,0 +1,29 @@
+[Unit]
+Description=Prometheus mysqld_exporter
+Documentation=https://github.com/prometheus/mysqld_exporter
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ mysqld_exporter_user }}
+Group={{ mysqld_exporter_group }}
+
+ExecStart={{ mysqld_exporter_install_path }} \
+  --config.my-cnf={{ mysqld_exporter_my_cnf }} \
+  --mysqld.address={{ mysqld_exporter_db_host }}:{{ mysqld_exporter_db_port }} \
+  --web.listen-address={{ mysqld_exporter_listen_address }}
+
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

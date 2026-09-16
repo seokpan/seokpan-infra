@@ -1,0 +1,123 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: mysqld_exporter binary, credentials, systemd service installation
+
+- name: mysqld_exporter 서비스 그룹 생성
+  ansible.builtin.group:
+    name: "{{ mysqld_exporter_group }}"
+    system: true
+    state: present
+
+- name: mysqld_exporter 서비스 사용자 생성
+  ansible.builtin.user:
+    name: "{{ mysqld_exporter_user }}"
+    group: "{{ mysqld_exporter_group }}"
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+    home: "{{ mysqld_exporter_config_dir }}"
+    state: present
+
+- name: mysqld_exporter 캐시 디렉터리 생성
+  ansible.builtin.file:
+    path: "{{ mysqld_exporter_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: mysqld_exporter 설정 디렉터리 생성
+  ansible.builtin.file:
+    path: "{{ mysqld_exporter_config_dir }}"
+    state: directory
+    owner: "{{ mysqld_exporter_user }}"
+    group: "{{ mysqld_exporter_group }}"
+    mode: "0750"
+
+- name: mysqld_exporter archive 다운로드
+  ansible.builtin.get_url:
+    url: "{{ mysqld_exporter_download_url }}"
+    dest: "{{ mysqld_exporter_cache_dir }}/{{ mysqld_exporter_archive }}"
+    checksum: "sha256:{{ mysqld_exporter_archive_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: mysqld_exporter archive 압축 해제
+  ansible.builtin.unarchive:
+    src: "{{ mysqld_exporter_cache_dir }}/{{ mysqld_exporter_archive }}"
+    dest: "{{ mysqld_exporter_cache_dir }}"
+    remote_src: true
+    creates: "{{ mysqld_exporter_cache_dir }}/mysqld_exporter-{{ mysqld_exporter_version }}.linux-amd64/mysqld_exporter"
+
+- name: mysqld_exporter binary 설치
+  ansible.builtin.copy:
+    src: "{{ mysqld_exporter_cache_dir }}/mysqld_exporter-{{ mysqld_exporter_version }}.linux-amd64/mysqld_exporter"
+    dest: "{{ mysqld_exporter_install_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart mysqld_exporter
+
+- name: mysqld_exporter DB credential 파일 배포
+  ansible.builtin.template:
+    src: .my.cnf.j2
+    dest: "{{ mysqld_exporter_my_cnf }}"
+    owner: "{{ mysqld_exporter_user }}"
+    group: "{{ mysqld_exporter_group }}"
+    mode: "0600"
+  no_log: true
+  notify: Restart mysqld_exporter
+
+- name: mysqld_exporter systemd unit 배포
+  ansible.builtin.template:
+    src: mysqld_exporter.service.j2
+    dest: /etc/systemd/system/mysqld_exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart mysqld_exporter
+
+- name: systemd daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: mysqld_exporter 서비스 활성화 및 시작
+  ansible.builtin.systemd:
+    name: mysqld_exporter
+    enabled: true
+    state: started
+
+- name: mysqld_exporter 버전 확인
+  ansible.builtin.command:
+    cmd: "{{ mysqld_exporter_install_path }} --version"
+  register: mysqld_exporter_version_result
+  changed_when: false
+
+- name: mysqld_exporter 버전 검증
+  ansible.builtin.assert:
+    that:
+      - mysqld_exporter_version_result.rc == 0
+      - >-
+        (mysqld_exporter_version_result.stderr | trim).startswith(
+          'mysqld_exporter, version ' ~ mysqld_exporter_version
+        )
+    fail_msg: >-
+      mysqld_exporter 버전 검증 실패:
+      expected={{ mysqld_exporter_version }},
+      output={{ mysqld_exporter_version_result.stderr }}
+
+- name: mysqld_exporter metrics endpoint 확인
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:9104/metrics"
+    method: GET
+    status_code: 200
+    return_content: false
+  register: mysqld_exporter_metrics_result
+  retries: 10
+  delay: 2
+  until: mysqld_exporter_metrics_result.status == 200
+  changed_when: false
