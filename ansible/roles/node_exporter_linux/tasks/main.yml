@@ -1,0 +1,93 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: node_exporter binary install + systemd service (mariadb-01/02, maxscale-01, nfs)
+
+- name: Ensure node_exporter system group exists
+  ansible.builtin.group:
+    name: "{{ node_exporter_group }}"
+    system: true
+    state: present
+
+- name: Ensure node_exporter system user exists
+  ansible.builtin.user:
+    name: "{{ node_exporter_user }}"
+    group: "{{ node_exporter_group }}"
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+    state: present
+
+- name: Ensure node_exporter cache directory exists
+  ansible.builtin.file:
+    path: "{{ node_exporter_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download pinned node_exporter archive
+  ansible.builtin.get_url:
+    url: "{{ node_exporter_download_url }}"
+    dest: "{{ node_exporter_cache_dir }}/{{ node_exporter_archive }}"
+    checksum: "sha256:{{ node_exporter_archive_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Extract pinned node_exporter archive
+  ansible.builtin.unarchive:
+    src: "{{ node_exporter_cache_dir }}/{{ node_exporter_archive }}"
+    dest: "{{ node_exporter_cache_dir }}"
+    remote_src: true
+    creates: "{{ node_exporter_cache_dir }}/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+
+- name: Install pinned node_exporter binary
+  ansible.builtin.copy:
+    src: "{{ node_exporter_cache_dir }}/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+    dest: "{{ node_exporter_install_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart node_exporter
+
+- name: Deploy node_exporter systemd unit
+  ansible.builtin.template:
+    src: node_exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart node_exporter
+
+- name: Enable and start node_exporter
+  ansible.builtin.systemd:
+    name: node_exporter
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Verify installed node_exporter version
+  ansible.builtin.command:
+    cmd: "{{ node_exporter_install_path }} --version"
+  register: node_exporter_installed_version
+  changed_when: false
+
+- name: Assert installed node_exporter version contract
+  ansible.builtin.assert:
+    that:
+      - "'node_exporter, version ' ~ node_exporter_version in node_exporter_installed_version.stdout"
+    fail_msg: >-
+      Installed node_exporter version mismatch on {{ inventory_hostname }}.
+      Expected {{ node_exporter_version }},
+      actual output: {{ node_exporter_installed_version.stdout }}
+
+- name: Verify node_exporter metrics endpoint responds locally
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:9100/metrics"
+    return_content: false
+    status_code: 200
+  register: node_exporter_metrics_check
+  changed_when: false

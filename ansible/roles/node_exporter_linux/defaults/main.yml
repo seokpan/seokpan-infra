@@ -1,0 +1,26 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: node_exporter_linux role default variables
+#
+# 버전은 kube-prometheus-stack의 in-cluster node-exporter(1.12.1-distroless,
+# 최유준 확인)와 동일 계열로 고정해 Metric 스키마를 통일한다.
+# 대상(mariadb-01/02, maxscale-01, nfs)은 Kubernetes Node가 아닌 CentOS Guest VM
+# 이므로 컨테이너 이미지가 아닌 공식 릴리스 바이너리를 systemd 서비스로 직접 설치한다.
+# Kubernetes Node의 node-exporter는 kube-prometheus-stack이 별도로 관리하므로
+# 이 Role의 대상에 포함하지 않는다.
+
+node_exporter_version: "1.12.1"
+node_exporter_archive: "node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+node_exporter_download_url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/{{ node_exporter_archive }}"
+# 2026-09 GitHub Releases 페이지 기준 값 — 적용 전 서버에서 재검증 권장
+node_exporter_archive_sha256: "b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63"
+
+node_exporter_cache_dir: "/var/cache/seokpan/node_exporter/{{ node_exporter_version }}"
+node_exporter_install_path: "/usr/local/bin/node_exporter"
+
+node_exporter_user: "node_exporter"
+node_exporter_group: "node_exporter"
+
+node_exporter_listen_address: "0.0.0.0:9100"

@@ -1,0 +1,6 @@
+---
+- name: Install and configure node_exporter on external DB/MaxScale/NFS Guest VM
+  hosts: mariadbs:maxscale:storage
+  become: true
+  roles:
+    - node_exporter_linux
