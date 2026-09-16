@@ -37,10 +37,37 @@
     namespace: "{{ argocd_namespace }}"
     src: "{{ argocd_manifest_local_path }}"
     state: present
+    apply: true
     server_side_apply:
       field_manager: "{{ argocd_field_manager }}"
       force_conflicts: true
   register: argocd_apply_result
+  delegate_to: localhost
+  become: false
+
+- name: argocd-server Deployment 원본 정의 추출 (install manifest 내 해당 문서만)
+  ansible.builtin.set_fact:
+    argocd_server_deployment_def: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | selectattr('kind', 'defined')
+         | selectattr('kind', 'equalto', 'Deployment')
+         | selectattr('metadata.name', 'equalto', 'argocd-server')
+         | first }}
+
+- name: "argocd-server Deployment spec.replicas 명시적 SSA 관리 (#198)"
+  # kubernetes.core.k8s가 partial definition을 Python 클라이언트 타입 모델로 변환하는 과정에서
+  # spec.selector/template을 명시적 null로 직렬화 -> immutable 필드 검증 실패(#198 발견).
+  # 이미 다운로드된 install manifest에서 argocd-server의 완전한 원본 정의를 추출해
+  # replicas만 병합하여 SSA -> null 문제 없이 field manager를 명시적으로 확보.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    namespace: "{{ argocd_namespace }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+    definition: "{{ argocd_server_deployment_def | combine({'spec': {'replicas': 1}}, recursive=true) }}"
+  register: argocd_server_replicas_patch
   delegate_to: localhost
   become: false
 
@@ -56,6 +83,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ argocd_kubeconfig }}"
     state: present
+    apply: true
     server_side_apply:
       field_manager: "{{ argocd_field_manager }}"
     definition:
@@ -213,6 +241,7 @@
         kubeconfig: "{{ argocd_kubeconfig }}"
         src: "{{ root_application_manifest_temp.path }}"
         state: present
+        apply: true
         server_side_apply:
           field_manager: "{{ argocd_field_manager }}"
           force_conflicts: true
