@@ -25,20 +25,32 @@
       - gateway_tls_san | length > 0
       - gateway_tls_namespace | length > 0
       - gateway_tls_secret_name | length > 0
+      - gateway_tls_source in ['internal_ca', 'external_acme']
     fail_msg: >-
       gateway_tls Role은 ansible_controller에서 실행해야 하며
       cluster_kubeconfig 및 Gateway TLS 계약 변수가 필요합니다.
+
+- name: Gateway TLS 유효 Certificate와 Private Key 경로 확정
+  ansible.builtin.set_fact:
+    gateway_tls_effective_cert_path: >-
+      {{ gateway_tls_cert_path if gateway_tls_source == 'internal_ca'
+         else gateway_tls_external_fullchain_path }}
+    gateway_tls_effective_key_path: >-
+      {{ gateway_tls_key_path if gateway_tls_source == 'internal_ca'
+         else gateway_tls_external_key_path }}
 
 - name: Internal Root CA Certificate 존재 확인
   ansible.builtin.stat:
     path: "{{ internal_ca_cert_path }}"
   register: gateway_tls_root_ca_cert
+  when: gateway_tls_source == 'internal_ca'
 
 - name: Internal Root CA Private Key 존재 확인
   ansible.builtin.stat:
     path: "{{ internal_ca_key_path }}"
   register: gateway_tls_root_ca_key
   no_log: true
+  when: gateway_tls_source == 'internal_ca'
 
 - name: Internal Root CA 준비 상태 검증
   ansible.builtin.assert:
@@ -48,6 +60,56 @@
     fail_msg: >-
       Seokpan Internal Root CA가 준비되어 있지 않습니다.
       playbooks/internal_ca.yml을 먼저 확인하세요.
+  when: gateway_tls_source == 'internal_ca'
+
+- name: External ACME Fullchain 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_external_fullchain_path }}"
+    follow: true
+  register: gateway_tls_external_fullchain
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME Private Key 확인
+  ansible.builtin.stat:
+    path: "{{ gateway_tls_external_key_path }}"
+    follow: true
+  register: gateway_tls_external_key
+  no_log: true
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME 입력 계약 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_external_fullchain.stat.exists | default(false)
+      - gateway_tls_external_fullchain.stat.isreg | default(false)
+      - (gateway_tls_external_fullchain.stat.pw_name | default('')) == 'root'
+      - gateway_tls_external_key.stat.exists | default(false)
+      - gateway_tls_external_key.stat.isreg | default(false)
+      - (gateway_tls_external_key.stat.pw_name | default('')) == 'root'
+      - (gateway_tls_external_key.stat.mode | default('')) == '0600'
+    fail_msg: >-
+      External ACME fullchain/key가 없거나 소유자·Private Key 권한이 안전하지 않습니다.
+      Kubernetes Secret은 변경하지 않습니다.
+  no_log: true
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME Fullchain Certificate 개수 확인
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -c
+      - ^-----BEGIN CERTIFICATE-----$
+      - "{{ gateway_tls_external_fullchain_path }}"
+  register: gateway_tls_external_chain_count
+  changed_when: false
+  when: gateway_tls_source == 'external_acme'
+
+- name: External ACME Fullchain 계약 검증
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_external_chain_count.stdout | int >= 2
+    fail_msg: "External ACME tls.crt 입력은 Leaf와 Intermediate를 포함한 fullchain이어야 합니다."
+  when: gateway_tls_source == 'external_acme'
 
 - name: Gateway TLS 대상 Namespace 존재 확인
   kubernetes.core.k8s_info:
@@ -72,19 +134,19 @@
 
 - name: 기존 Gateway Certificate 확인
   ansible.builtin.stat:
-    path: "{{ gateway_tls_cert_path }}"
+    path: "{{ gateway_tls_effective_cert_path }}"
   register: gateway_tls_existing_cert
 
 - name: 기존 Gateway Private Key 확인
   ansible.builtin.stat:
-    path: "{{ gateway_tls_key_path }}"
+    path: "{{ gateway_tls_effective_key_path }}"
   register: gateway_tls_existing_key
   no_log: true
 
 - name: 기존 Certificate 만료 임박 여부 확인
   ansible.builtin.command:
     cmd: >-
-      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      openssl x509 -in {{ gateway_tls_effective_cert_path }} -noout
       -checkend {{ gateway_tls_renew_before_seconds }}
   register: gateway_tls_existing_expiry
   changed_when: false
@@ -94,17 +156,22 @@
 - name: 기존 Certificate Hostname/SAN 확인
   ansible.builtin.command:
     cmd: >-
-      openssl x509 -in {{ gateway_tls_cert_path }} -noout
+      openssl x509 -in {{ gateway_tls_effective_cert_path }} -noout
       -checkhost {{ gateway_tls_fqdn }}
   register: gateway_tls_existing_hostname
   changed_when: false
   failed_when: false
   when: gateway_tls_existing_cert.stat.exists
 
-- name: 기존 Certificate Modulus 확인
-  ansible.builtin.command:
-    cmd: "openssl x509 -in {{ gateway_tls_cert_path }} -noout -modulus"
-  register: gateway_tls_existing_cert_modulus
+- name: 기존 Certificate Public Key 확인
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl x509 -in {{ gateway_tls_effective_cert_path | quote }} -pubkey -noout |
+      openssl pkey -pubin -outform DER |
+      sha256sum
+    executable: /bin/bash
+  register: gateway_tls_existing_cert_public_key
   changed_when: false
   failed_when: false
   no_log: true
@@ -112,10 +179,14 @@
     - gateway_tls_existing_cert.stat.exists
     - gateway_tls_existing_key.stat.exists
 
-- name: 기존 Private Key Modulus 확인
-  ansible.builtin.command:
-    cmd: "openssl rsa -in {{ gateway_tls_key_path }} -noout -modulus"
-  register: gateway_tls_existing_key_modulus
+- name: 기존 Private Key Public Key 확인
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      openssl pkey -in {{ gateway_tls_effective_key_path | quote }} -pubout -outform DER |
+      sha256sum
+    executable: /bin/bash
+  register: gateway_tls_existing_key_public_key
   changed_when: false
   failed_when: false
   no_log: true
@@ -131,11 +202,11 @@
         or (not gateway_tls_existing_key.stat.exists)
         or ((gateway_tls_existing_expiry.rc | default(1)) != 0)
         or ((gateway_tls_existing_hostname.rc | default(1)) != 0)
-        or ((gateway_tls_existing_cert_modulus.rc | default(1)) != 0)
-        or ((gateway_tls_existing_key_modulus.rc | default(1)) != 0)
+        or ((gateway_tls_existing_cert_public_key.rc | default(1)) != 0)
+        or ((gateway_tls_existing_key_public_key.rc | default(1)) != 0)
         or (
-          (gateway_tls_existing_cert_modulus.stdout | default(''))
-          != (gateway_tls_existing_key_modulus.stdout | default(''))
+          (gateway_tls_existing_cert_public_key.stdout | default(''))
+          != (gateway_tls_existing_key_public_key.stdout | default(''))
         )
       }}
   no_log: true

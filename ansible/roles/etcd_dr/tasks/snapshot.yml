@@ -1,0 +1,208 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) etcd Snapshot 자동 생성(STEP 4) + 무결성 검증 +
+#          검증 VM(loadgen/2/3) 전체 배포 및 재검증(STEP 5~6)
+#          실패 시(SHA-256 불일치 등) 이후 Restore 단계로 진행하지 않음.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14 (copy 모듈 checksum 파라미터 제거 —
+#            SHA-1 내장 검증과 SHA-256 요구값 불일치로 실패했던 버그 수정.
+#            SHA-256 검증은 별도 stat+assert에서 전담)
+
+# --- STEP 4: Snapshot 생성 ---
+
+- name: (cp-01) Snapshot 저장 디렉토리 존재 확인
+  file:
+    path: "{{ snapshot_remote_path }}"
+    state: directory
+    mode: "0700"
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+
+- name: Snapshot 파일명 결정 (타임스탬프 기반, 실행마다 고유)
+  set_fact:
+    snapshot_filename: "etcd-snapshot-{{ ansible_facts['date_time']['iso8601_basic_short'] }}.db"
+  run_once: true
+
+- name: (cp-01) etcdctl snapshot save 실행
+  command: >
+    {{ etcd_tools_path }}/etcdctl snapshot save
+    {{ snapshot_remote_path }}/{{ snapshot_filename }}
+    --endpoints={{ etcd_client_endpoint }}
+    --cacert={{ etcd_ca_cert }}
+    --cert={{ etcd_client_cert }}
+    --key={{ etcd_client_key }}
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+  changed_when: true
+  register: snapshot_save_result
+
+- name: (cp-01) Snapshot 상태 확인 (HASH/REVISION/TOTAL KEYS/TOTAL SIZE)
+  command: >
+    {{ etcd_tools_path }}/etcdutl snapshot status
+    {{ snapshot_remote_path }}/{{ snapshot_filename }}
+    --write-out=json
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+  changed_when: false
+  register: snapshot_status_raw
+
+- name: Snapshot 상태 JSON 파싱 및 기록 (Evidence 연계용 fact)
+  set_fact:
+    snapshot_status: "{{ snapshot_status_raw.stdout | from_json }}"
+  run_once: true
+
+- name: Snapshot 상태 표시
+  debug:
+    msg: >
+      Snapshot 생성 완료 — hash={{ snapshot_status.hash }},
+      revision={{ snapshot_status.revision }},
+      totalKey={{ snapshot_status.totalKey }},
+      totalSize={{ snapshot_status.totalSize }}
+  run_once: true
+
+# --- STEP 15 선행: Object Baseline 수집 (snapshot 생성과 동일 시점, cp-01) ---
+
+- name: (cp-01) Baseline Namespace 목록 조회 (read-only)
+  command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf
+    get namespaces -o json
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+  changed_when: false
+  register: dr_baseline_ns_raw
+
+- name: (cp-01) Baseline Deployment 목록 조회 (전체 namespace, read-only)
+  command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf
+    get deployments -A -o json
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+  changed_when: false
+  register: dr_baseline_deploy_raw
+
+- name: (cp-01) Baseline Secret 목록 조회 (전체 namespace, read-only)
+  command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf
+    get secrets -A -o json
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+  changed_when: false
+  register: dr_baseline_secret_raw
+
+- name: Baseline Namespace 정규화
+  set_fact:
+    dr_baseline_namespaces: >-
+      {{
+        (dr_baseline_ns_raw.stdout | from_json)['items']
+        | map(attribute='metadata.name') | sort | list
+      }}
+
+- name: Baseline Deployment 정규화 (namespace/name 문자열 리스트로 누적)
+  set_fact:
+    dr_baseline_deployments: "{{ dr_baseline_deployments | default([]) + [item.metadata.namespace ~ '/' ~ item.metadata.name] }}"
+  loop: "{{ (dr_baseline_deploy_raw.stdout | from_json)['items'] }}"
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+
+- name: Baseline Deployment 목록 정렬
+  set_fact:
+    dr_baseline_deployments: "{{ dr_baseline_deployments | default([]) | sort | list }}"
+
+- name: Baseline Secret 정규화 (namespace/name 문자열 리스트로 누적)
+  set_fact:
+    dr_baseline_secrets: "{{ dr_baseline_secrets | default([]) + [item.metadata.namespace ~ '/' ~ item.metadata.name] }}"
+  loop: "{{ (dr_baseline_secret_raw.stdout | from_json)['items'] }}"
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+
+- name: Baseline Secret 목록 정렬
+  set_fact:
+    dr_baseline_secrets: "{{ dr_baseline_secrets | default([]) | sort | list }}"
+
+- name: Baseline 수집 완료 표시
+  debug:
+    msg: >
+      Baseline 수집 완료 — Namespace {{ dr_baseline_namespaces | length }}개,
+      Deployment {{ dr_baseline_deployments | length }}개,
+      Secret {{ dr_baseline_secrets | length }}개
+
+# --- STEP 5: Controller 경유 전달 + SHA-256 검증 ---
+
+- name: (cp-01) Snapshot 원본 SHA-256 계산
+  stat:
+    path: "{{ snapshot_remote_path }}/{{ snapshot_filename }}"
+    checksum_algorithm: sha256
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+  register: snapshot_src_stat
+
+- name: 원본 SHA-256 기록 (Evidence 연계용 fact)
+  set_fact:
+    snapshot_sha256_source: "{{ snapshot_src_stat.stat.checksum }}"
+  run_once: true
+
+- name: (cp-01 → Controller) Snapshot 파일 로컬로 fetch
+  fetch:
+    src: "{{ snapshot_remote_path }}/{{ snapshot_filename }}"
+    dest: "{{ snapshot_local_stage }}/{{ snapshot_filename }}"
+    flat: true
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+
+# --- STEP 6: 검증 VM(loadgen/loadgen2/loadgen3) 전체 배포 + 재검증 ---
+
+- name: (검증 VM 전체) Snapshot 저장 디렉토리 존재 확인
+  file:
+    path: "{{ snapshot_target_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: (Controller → 검증 VM 전체) Snapshot 배포
+  copy:
+    src: "{{ snapshot_local_stage }}/{{ snapshot_filename }}"
+    dest: "{{ snapshot_target_dir }}/{{ snapshot_filename }}"
+    mode: "0600"
+    # checksum 파라미터 제거 — copy 모듈 내장 검증은 SHA-1 고정이라
+    # SHA-256 값과 비교 시 항상 실패함. 실제 무결성 검증은 아래
+    # 별도 stat+assert(SHA-256)에서 수행.
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+  register: snapshot_deploy_result
+
+- name: (검증 VM 전체) 배포된 Snapshot SHA-256 재계산
+  stat:
+    path: "{{ snapshot_target_dir }}/{{ snapshot_filename }}"
+    checksum_algorithm: sha256
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+  register: snapshot_dest_stat_results
+
+- name: 원본과 배포본 SHA-256 불일치 시 즉시 중단
+  assert:
+    that:
+      - "item.stat.checksum == snapshot_sha256_source"
+    fail_msg: >
+      {{ item.item }}의 Snapshot SHA-256({{ item.stat.checksum }})이
+      원본({{ snapshot_sha256_source }})과 다릅니다. Restore를 진행하지 않습니다.
+    success_msg: "{{ item.item }} Snapshot SHA-256 일치 확인"
+  loop: "{{ snapshot_dest_stat_results.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Snapshot 단계 통과 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_snapshot_filename: "{{ snapshot_filename }}"
+    dr_snapshot_sha256: "{{ snapshot_sha256_source }}"
+    dr_snapshot_status: "{{ snapshot_status }}"
+    dr_snapshot_verified: true
+    dr_restore_cluster_token: "{{ restore_cluster_token }}"

@@ -1,0 +1,80 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) 3-member etcd Restore 자동화 (STEP 10)
+#          dr_isolated_etcd 그룹 전체에서 각 노드가 자기 자신의 member
+#          정보로 개별 실행한다(A안). cluster token은 STEP 4에서 loadgen이
+#          계산해둔 값을 재사용 — 노드별 재계산 시 토큰 불일치로 클러스터
+#          형성이 실패하므로 절대 노드별로 새로 계산하지 않는다.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14
+
+- name: 노드 공통 cluster token 결정 (loadgen이 STEP 4에서 계산한 값 재사용)
+  set_fact:
+    dr_shared_cluster_token: "{{ hostvars[groups['dr_isolated_etcd'][0]].dr_restore_cluster_token }}"
+
+- name: 노드 공통 Snapshot 파일명 결정 (loadgen 기준)
+  set_fact:
+    dr_shared_snapshot_filename: "{{ hostvars[groups['dr_isolated_etcd'][0]].dr_snapshot_filename }}"
+
+- name: 자기 자신의 member 정보 결정
+  set_fact:
+    dr_my_member: "{{ restore_member_map[inventory_hostname] }}"
+
+- name: initial-cluster 멤버별 문자열 생성
+  set_fact:
+    dr_initial_cluster_parts: "{{ dr_initial_cluster_parts | default([]) + [item.value.name ~ '=http://' ~ item.value.ip ~ ':' ~ etcd_peer_port] }}"
+  loop: "{{ restore_member_map | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: initial-cluster 문자열 조합 (3-member 전체, 노드 간 동일해야 함)
+  set_fact:
+    dr_initial_cluster: "{{ dr_initial_cluster_parts | join(',') }}"
+
+- name: Restore data-dir 잔존 여부 재확인 (restore_init.yml 선행 필수)
+  stat:
+    path: "{{ restore_data_dir }}"
+  register: dr_restore_dir_check
+
+- name: 잔존 데이터 존재 시 즉시 중단
+  fail:
+    msg: "{{ restore_data_dir }}이 이미 존재합니다. restore_init.yml이 선행되지 않았습니다."
+  when: dr_restore_dir_check.stat.exists
+
+- name: etcdutl snapshot restore 실행
+  command: >
+    {{ etcd_tools_path }}/etcdutl snapshot restore
+    {{ snapshot_target_dir }}/{{ dr_shared_snapshot_filename }}
+    --name {{ dr_my_member.name }}
+    --initial-cluster {{ dr_initial_cluster }}
+    --initial-cluster-token {{ dr_shared_cluster_token }}
+    --initial-advertise-peer-urls http://{{ dr_my_member.ip }}:{{ etcd_peer_port }}
+    --data-dir {{ restore_data_dir }}
+  changed_when: true
+  register: dr_restore_result
+
+- name: etcd-dr.service systemd unit 배포
+  template:
+    src: etcd-dr.service.j2
+    dest: /etc/systemd/system/etcd-dr.service
+    mode: "0644"
+  register: dr_service_template_result
+
+- name: systemd 데몬 재로드
+  systemd:
+    daemon_reload: true
+  when: dr_service_template_result.changed
+
+- name: etcd-dr 서비스 기동
+  systemd:
+    name: etcd-dr
+    state: started
+    enabled: false
+  register: dr_service_start_result
+
+- name: Restore 단계 완료 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_restore_member_name: "{{ dr_my_member.name }}"
+    dr_restore_completed: true

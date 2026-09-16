@@ -12,6 +12,7 @@ credentials
 credentials.*
 *credentials*
 *credential*
+!ansible/tools/credential-init
 
 # Password files
 *password*
@@ -111,3 +112,6 @@ service-account*.json
 
 .DS_Store
 Thumbs.db
+
+# DR-02 runtime evidence
+/dr-evidence/

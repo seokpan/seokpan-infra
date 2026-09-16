@@ -1,0 +1,43 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) etcd-tools 바이너리를 운영 cp-01 → Controller → 검증 VM
+#          전체(dr_isolated_etcd 3-node)로 배포. checksum 비교로 idempotent.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14 (버그 수정 — delegate_to/loop 누락으로 loadgen 1대에만
+#            배포되던 문제. with_nested로 3-node 전체 배포하도록 수정)
+
+- name: (cp-01) etcd-tools 바이너리를 Controller 로컬로 fetch
+  fetch:
+    src: "{{ etcd_tools_path }}/{{ item }}"
+    dest: "/tmp/etcd-tools-src/{{ item }}"
+    flat: true
+  loop:
+    - etcd
+    - etcdctl
+    - etcdutl
+  delegate_to: "{{ snapshot_source_host }}"
+  run_once: true
+
+- name: (검증 VM 전체) etcd-tools 디렉토리 생성
+  file:
+    path: "{{ etcd_tools_path }}"
+    state: directory
+    mode: "0755"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['dr_isolated_etcd'] }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: (검증 VM 전체) Controller 로컬 사본을 검증 VM으로 배포
+  copy:
+    src: "/tmp/etcd-tools-src/{{ item[1] }}"
+    dest: "{{ etcd_tools_path }}/{{ item[1] }}"
+    mode: "0755"
+  delegate_to: "{{ item[0] }}"
+  with_nested:
+    - "{{ groups['dr_isolated_etcd'] }}"
+    - ['etcd', 'etcdctl', 'etcdutl']
+  loop_control:
+    label: "{{ item[0] }}:{{ item[1] }}"

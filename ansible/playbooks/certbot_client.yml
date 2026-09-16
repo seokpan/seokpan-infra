@@ -1,0 +1,9 @@
+---
+- name: Install pinned Certbot client on Ansible Controller
+  hosts: ansible_controller
+  connection: local
+  become: true
+  gather_facts: false
+
+  roles:
+    - certbot_client

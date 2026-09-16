@@ -1,0 +1,69 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02 etcd Snapshot Restore 자동화 메인 플레이북
+# 최초 작성 시간: 2026-09-14
+# 수정 시간: 2026-09-15 (Safety Guard / Restore Decision /
+#            Final Restore Gate 연결)
+
+- name: DR-02 etcd Snapshot 준비
+  hosts: loadgen
+  gather_facts: true
+  roles:
+    - etcd_dr
+
+
+- name: 시간 동기화 (검증용 3-node 전체 대상)
+  hosts: dr_isolated_etcd
+  gather_facts: true
+  roles:
+    - chrony
+  tags: [time_check]
+
+- name: DR-02 Safety Guard 및 Restore Decision
+  hosts: loadgen
+  gather_facts: true
+  tasks:
+    - name: Safety Guard 실행
+      ansible.builtin.import_role:
+        name: etcd_dr
+        tasks_from: config_guard
+
+    - name: Restore Decision 실행
+      ansible.builtin.import_role:
+        name: etcd_dr
+        tasks_from: restore_decision
+
+- name: DR-02 3-member etcd Restore 및 검증
+  hosts: dr_isolated_etcd
+  gather_facts: true
+  tasks:
+    - name: Restore Decision 확인 후 전체 Restore Flow 포함
+      ansible.builtin.include_role:
+        name: etcd_dr
+        tasks_from: restore_flow
+      when:
+        - hostvars[groups['dr_isolated_etcd'][0]].dr_restore_decision | default('STOP') == 'RESTORE'
+        - hostvars[groups['dr_isolated_etcd'][0]].dr_restore_decision_passed | default(false) | bool
+
+- name: DR-02 kube-apiserver 실행 환경 준비 및 검증
+  hosts: loadgen
+  gather_facts: true
+  tasks:
+    - name: Restore Decision 확인 후 Post-Restore Validation 포함
+      ansible.builtin.include_role:
+        name: etcd_dr
+        tasks_from: post_restore_validation
+      when:
+        - hostvars[groups['dr_isolated_etcd'][0]].dr_restore_decision | default('STOP') == 'RESTORE'
+        - hostvars[groups['dr_isolated_etcd'][0]].dr_restore_decision_passed | default(false) | bool
+
+- name: DR-02 Evidence 및 Report 생성
+  hosts: loadgen
+  gather_facts: true
+  tasks:
+    - name: Evidence 및 Report 생성
+      ansible.builtin.include_role:
+        name: etcd_dr
+        tasks_from: report

@@ -1,0 +1,1037 @@
+#!/usr/bin/env bash
+# ansible-safe-run v2.1: native Ansible adapter, validated against ansible-core 2.20.8.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    printf '%s\n' 'source로 실행하지 마세요. ./ansible-safe-run ... 로 실행하세요.' >&2
+    return 2
+fi
+set +x
+set -Eeuo pipefail
+usage() {
+    printf '%s\n' '사용법: ./ansible-safe-run <Playbook> [Ansible 옵션]' \
+      '--inspect-only: 접속/Check/적용 없이 Ansible 해석만 수행 (필요한 Vault Credential은 Kernel Keyring에서 자동 사용)' \
+      '--secret-extra-vars: 비표시 JSON 입력. 민감한 값을 -e로 전달하지 말고 이 옵션을 사용'
+}
+if (( $# == 0 )); then usage; exit 2; fi
+if [[ $1 == -h || $1 == --help ]]; then usage; exit 0; fi
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+for executable in python ansible ansible-playbook ansible-inventory; do
+    [[ -x "$root/.venv/bin/$executable" ]] || {
+        printf '%s\n' "프로젝트 .venv/bin/$executable 실행 파일이 없습니다." >&2
+        exit 2
+    }
+done
+args=("$@")
+# Extra-var values travel through an anonymous pipe, not Python's process argv.
+# Values typed into the ORIGINAL shell command may already be exposed.
+IFS= read -r -d '' runner_code <<'PYTHON' || :
+import getpass, hashlib, json, os, pwd, re, resource, signal, stat, subprocess, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+RISK = {'backup_transfer.yml','jenkins_secrets.yml','mariadb_dr_recovery.yml','mariadb_restore_chain.yml'}
+MANUAL_ONLY = {'db_operator_login.yml'}
+UNSUPPORTED_SPECIAL_TESTS = {
+    'test_ca_keyusage_checkmode.yml',
+    'test_ca_keyusage_logic.yml',
+}
+KEYCTL = '/usr/bin/keyctl'
+ALLOWED_USERS = frozenset({'ansible','jth','ksh','cyj'})
+CREDENTIAL_RING_NAME = 's_sh_credentials'
+CREDENTIAL_KEYS = {
+    'vault':'s_sh_vault',
+    'become':'s_sh_become',
+}
+KEYCTL_ENV = {
+    'PATH':'/usr/bin:/bin',
+    'LC_ALL':'C',
+    'LANG':'C',
+}
+# Human-reviewed check_mode:false evidence at repository snapshot below.
+# Evidence is bound to
+# file content and exact Task identity; any relevant edit invalidates it.
+REVIEW_BASE_COMMIT = '41fc8f76b09aacc0062cc98bd0f8350fc806da6d'
+REVIEWED_CHECK_FALSE = {
+    'roles/chrony/tasks/main.yml': {
+        'sha256':'8b013525877d7bd59d244238991847ebdd3fa929367a21fb18afd94a051569bf',
+        'tasks':{
+            (42,'Check chrony package','command'),(57,'Check chronyd active state','command'),
+            (72,'Check chronyd enabled state','command'),(87,'Check system NTP synchronization','command'),
+            (106,'Check chronyc tracking','command'),(123,'Check selected NTP source','command'),
+            (143,'Check configured Chrony NTP source','command'),
+            (377,'Wait for Chrony synchronization after remediation','command'),(410,'Verify final chrony package','command'),
+            (425,'Verify final chronyd active state','command'),(440,'Verify final chronyd enabled state','command'),
+            (455,'Verify final configured Chrony NTP source','command'),(472,'Verify final NTP synchronization','command'),
+            (488,'Verify final Chrony tracking','command'),(502,'Verify final Chrony sources','command'),
+        }},
+    'roles/common_hosts/tasks/main.yml': {
+        'sha256':'08dc2091da71fb3ab1b6400bc41d8b53ca5de9da081a6603e73b394efc11d2a0',
+        'tasks':{(80,'Read project host aliases','command')}},
+    'roles/backend_db_secrets/tasks/main.yml': {
+        'sha256':'3cf96ac4078c9f8b1198970ca7c41265ac1fb7a68641dc7ec25834adfe7634e8',
+        'tasks':{
+            (52,'Synthetic Credential URL component round-trip 검증','command'),
+            (87,'실제 DB Password URL component 인코딩','command'),
+            (133,'실제 조립 DB URL 계약 검증','command'),
+        }},
+    'roles/kubeadm_control_plane/tasks/main.yml': {
+        'sha256':'484bd68c8c2f025e799bd4f033a2403a24a13e30fabc2ca58b074b79d3696ed6',
+        'tasks':{
+            (27,'Validate kubeadm configuration','command'),
+            (74,'Wait for Kubernetes API server','command'),
+            (84,'Check first control plane node registration','command'),
+        }},
+    'roles/kubeadm_control_plane_join/tasks/main.yml': {
+        'sha256':'48f5401476b7e33531feb23b3fed9c60bae7b0422ec40be2bc9881019fa5482f',
+        'tasks':{
+            (136,'Check control plane node registration','command'),
+            (151,'Check stacked etcd member pod','command'),
+        }},
+    'roles/kubeadm_worker/tasks/main.yml': {
+        'sha256':'6a49c3f673e434b0879f7614a4e1a8bbc64e7da6b9d0d23a49c5c0be6c3e31c9',
+        'tasks':{
+            (75,'Check worker registration in Kubernetes cluster','command'),
+        }},
+    'roles/calico/tasks/main.yml': {
+        'sha256':'862c7ebc83b0d6ad1070facacc35c1dd7cff0cc93f69355db3426622bbd660ae',
+        'tasks':{
+            (11,'Check Tigera Installation CRD','command'),
+            (37,'Wait for Tigera Installation CRD','command'),
+            (54,'Check Tigera Operator deployment','command'),
+            (81,'Wait for Tigera Operator rollout','command'),
+            (98,'Check project Calico Installation','command'),
+            (110,'Check project Calico API server','command'),
+            (137,'Read project Calico Installation','command'),
+            (170,'Wait for calico-node rollout','command'),
+            (182,'Validate TigeraStatus health','shell'),
+        }},
+    'roles/coredns_records/tasks/main.yml': {
+        'sha256':'6f2588c719c45a579362066f51bd957265817eee3a41974b5ae6f2a8b1016644',
+        'tasks':{
+            (28,'Read current CoreDNS Corefile','command'),
+        }},
+    'roles/k8s_addons/tasks/main.yml': {
+        'sha256':'e56cf8a801e2386da8b71d69456380de5b9834ec36f94a03ce3022f630569614',
+        'tasks':{
+            (41,'Check Gateway API manifest difference','command'),
+            (57,'Wait for GatewayClass CRD to be established','command'),
+            (67,'Wait for Gateway CRD to be established','command'),
+            (77,'Check NGINX Gateway Fabric CRD difference','command'),
+            (93,'Wait for NginxGateway CRD to be established','command'),
+            (103,'Wait for NginxProxy CRD to be established','command'),
+            (113,'Check NGINX Gateway Fabric controller difference','command'),
+            (129,'Wait for NGINX Gateway Fabric controller rollout','command'),
+            (138,'Check GatewayClass nginx','command'),
+            (145,'Check NGINX Gateway Fabric controller pods','command'),
+        }},
+    'roles/lb_network/tasks/main.yml': {
+        'sha256':'e816a2b5bd4eee7be159282741cb563204208d140fdf5818e2fee2b05b860a41',
+        'tasks':{(71,'Detect LB NetworkManager connection','command')}},
+    'roles/maxscale/tasks/setup_repo.yml': {
+        'sha256':'1645c22121de8b9435f0509490ef80556ecb8af52e562f8dc0bd9603e794c2ce',
+        'tasks':{(16,'mariadb-maxscale repo가 목표 버전으로 등록되어 있는지 확인','shell')}},
+    'roles/maxscale/tasks/configure.yml': {
+        'sha256':'13fad83dd268a51f624bc2f87508477c355c5bac49f34e2777d78d460cc7bf95',
+        'tasks':{(38,'배포된 maxscale.cnf 유효성 검증 (재기동 전 사전 확인)','command')}},
+    'roles/mariadb/tasks/setup_repo.yml': {
+        'sha256':'121df758abbd6d8efef74af09312bf0bcac1bf73a188f33a8b26ca70a7890957',
+        'tasks':{(16,'mariadb-main repo가 목표 버전으로 등록되어 있는지 확인','shell')}},
+    'roles/harbor/tasks/gc_policy.yml': {
+        'sha256':'44ae1efdf4d6866b309490449f356740f5f6674115a6d243269d3af74931a7dd',
+        'tasks':{(33,'Check current Harbor GC schedule','uri'),(99,'Get current Harbor GC schedule (검증용)','uri')}},
+    'roles/harbor/tasks/harbor_project.yml': {
+        'sha256':'b6006e57e0c9a4ca85eeab4d931d8d32befb6ba2121ddb8d16ba66bb12598c48',
+        'tasks':{(14,'Harbor Project(seokpan) 존재 여부 확인','uri')}},
+    'roles/harbor/tasks/immutability.yml': {
+        'sha256':'26569864745de4ed3880ba6b31c7862822bdc5f6603a844d885d9fcd298d7b47',
+        'tasks':{(38,'Harbor Project ID 조회 (Immutability용)','uri'),
+                 (69,'현재 Harbor Tag Immutability Rule 조회','uri'),(301,'Immutability Rule 최종 상태 재조회','uri')}},
+    'roles/harbor/tasks/robot_account.yml': {
+        'sha256':'fe2939a4774786078280482dfb87c9ec5eca838d359031d986fe9722700cbc26',
+        'tasks':{(43,'Harbor Project ID 조회 (Robot Account용)','uri'),
+                 (74,'Harbor Robot Account 목록 조회 (project-scope 필터 필수)','uri')}},
+    'roles/harbor/tasks/robot_account_api.yml': {
+        'sha256':'d13ad797af7676fd50bd223ba7610669565a347e4fcacdb0081fe53261d27213',
+        'tasks':{(39,'Harbor Project ID 조회 (API Robot Account용)','uri'),
+                 (70,'Harbor Robot Account 목록 조회 (project-scope 필터 필수)','uri')}},
+    'roles/harbor/tasks/main.yml': {
+        'sha256':'abd4f4805006dda3dbdd98e5a0fd83d8d8f1f7b0842799cc176ca9a6923f73a3',
+        'tasks':{
+            (31,'Check harbor-core container state','command'),
+            (96,'Check Harbor runtime firewall ports','command'),
+            (124,'Check Harbor permanent firewall ports','command'),
+            (306,'Read listening ports','command'),
+            (325,'Verify Harbor HTTPS response','uri'),
+            (336,'Check certificate SAN','command'),
+        }},
+    'roles/harbor/tasks/robot_account_runtime_pull.yml': {
+        'sha256':'00d58daeb454be4c0d41772238ecc09f60ebaa46ff9d9c5f6df2fffb563b4865',
+        'tasks':{
+            (5,'Harbor Project ID 조회 (Application Runtime Pull Robot용)','uri'),
+            (35,'Harbor Robot Account 목록 조회 (Application Runtime Pull Robot용)','uri'),
+        }},
+    'roles/internal_ca/tasks/bootstrap.yml': {
+        'sha256':'f67c2d0b0b6cfda8e2f3bf8422bcb9a3fe4488d0d6e0d21855155d209749c924',
+        'tasks':{
+            (68,'Root CA 인증서 내용 조회 (필수 확장 상태 판정용)','command'),
+            (91,'재발급 전 Root CA의 Subject Key Identifier 저장 (동일성 검증 기준값)','shell'),
+        }},
+    'roles/resolver_policy/tasks/main.yml': {
+        'sha256':'1677548617cbecb8bc5ec4740c821bd4a10cef5dd8b72afabba744b3fd9e02ee',
+        'tasks':{
+            (6,'Find default-route network device','shell'),
+            (25,'Find active NetworkManager connection','command'),
+            (55,'Read current IPv4 DNS search domains','command'),
+            (78,'Read current static hostname','command'),
+            (175,'Read DNS search domains after reconciliation','command'),
+            (198,'Read static hostname after reconciliation','command'),
+            (207,'Read resolver search domains after reconciliation','command'),
+        }},
+}
+CHILD = None
+class Stop(BaseException): pass
+class NeedVault(BaseException): pass
+def stop(s): raise Stop(s)
+def prompt(s, secret=False):
+    with open('/dev/tty', 'r') as tty_in, open('/dev/tty', 'w') as tty_out:
+        if secret:
+            return getpass.getpass(s, stream=tty_out)
+        tty_out.write(s)
+        tty_out.flush()
+        line = tty_in.readline()
+        if not line:
+            stop('입력 종료: 취소')
+        return line.rstrip('\r\n')
+def run_keyctl(*arguments):
+    options={
+        'stdout':subprocess.PIPE,
+        'stderr':subprocess.PIPE,
+        'stdin':subprocess.DEVNULL,
+        'env':KEYCTL_ENV,
+        'close_fds':True,
+        'start_new_session':True,
+        'check':False,
+        'shell':False,
+    }
+    try:
+        result=subprocess.run(
+            [KEYCTL,*(str(argument) for argument in arguments)],
+            **options,
+        )
+    except OSError:
+        stop(
+            'Kernel Keyring Credential 조회 실패: '
+            'tools/credential-init 상태를 확인하세요.'
+        )
+    if result.returncode != 0:
+        stop(
+            'Kernel Keyring Credential 조회 실패: '
+            'tools/credential-init을 먼저 실행하세요.'
+        )
+    return result.stdout
+
+def parse_key_id(raw):
+    token=raw.strip()
+    if re.fullmatch(rb'[1-9][0-9]{0,9}',token) is None:
+        stop('Kernel Keyring Key ID 형식 오류')
+    key_id=int(token)
+    if not 0 < key_id <= 0x7fffffff:
+        stop('Kernel Keyring Key ID 범위 오류')
+    return key_id
+
+def describe_key(key_id):
+    raw=run_keyctl('rdescribe',key_id)
+    if raw.endswith(b'\n'):
+        raw=raw[:-1]
+
+    fields=raw.split(b';',4)
+    if len(fields)!=5:
+        stop('Kernel Keyring 항목 정보 형식 오류')
+
+    key_type,owner,group,permissions,description=fields
+
+    if (
+        not key_type
+        or re.fullmatch(rb'[0-9]{1,10}',owner) is None
+        or re.fullmatch(rb'-?[0-9]{1,10}',group) is None
+        or re.fullmatch(rb'[0-9a-fA-F]{1,8}',permissions) is None
+    ):
+        stop('Kernel Keyring 항목 정보 검증 실패')
+
+    return key_type,int(owner),int(permissions,16),description
+
+def require_owned_key(key_id,uid,key_type,description=None):
+    actual_type,owner,permissions,actual_description=describe_key(key_id)
+
+    if actual_type!=key_type or owner!=uid:
+        stop('Kernel Keyring 소유자 또는 Key 종류 검증 실패')
+
+    if description is not None and actual_description!=description:
+        stop('Kernel Keyring Key 이름 검증 실패')
+
+    return permissions
+
+def ring_ids(ring_id,uid):
+    require_owned_key(ring_id,uid,b'keyring')
+
+    ids=tuple(
+        parse_key_id(token)
+        for token in run_keyctl('rlist',ring_id).split()
+    )
+
+    if len(ids)!=len(set(ids)):
+        stop('Kernel Keyring 중복 Key ID 감지')
+
+    return frozenset(ids)
+
+def find_direct_key(ring_id,uid,key_type,name):
+    expected_name=name.encode('ascii')
+    before=ring_ids(ring_id,uid)
+    matches=[]
+
+    for key_id in before:
+        actual_type,owner,_permissions,description=describe_key(key_id)
+
+        if description!=expected_name:
+            continue
+
+        if actual_type!=key_type or owner!=uid:
+            stop('Kernel Keyring 항목 소유자 검증 실패')
+
+        matches.append(key_id)
+
+    if before!=ring_ids(ring_id,uid) or len(matches)>1:
+        stop('Kernel Keyring 상태 변경 또는 중복 Credential 감지')
+
+    if not matches:
+        return None
+
+    key_id=matches[0]
+
+    searched_id=parse_key_id(
+        run_keyctl('search',ring_id,key_type.decode('ascii'),name)
+    )
+
+    if searched_id!=key_id:
+        stop('Kernel Keyring 검색 결과 불일치')
+
+    require_owned_key(key_id,uid,key_type,expected_name)
+
+    if before!=ring_ids(ring_id,uid):
+        stop('Kernel Keyring 조회 중 상태 변경 감지')
+
+    return key_id
+
+def validate_execution_user():
+    uid=os.getuid()
+    euid=os.geteuid()
+
+    if uid==0 or euid==0 or uid!=euid:
+        stop('허용된 일반 계정(ansible/jth/ksh/cyj)으로 직접 실행해야 합니다.')
+
+    if os.getresuid()!=(uid,uid,uid):
+        stop('sudo/setuid 형태로 ansible-safe-run을 실행할 수 없습니다.')
+
+    if os.getgid()!=os.getegid():
+        stop('실제 GID와 유효 GID가 다른 상태에서는 ansible-safe-run을 실행할 수 없습니다.')
+
+    if any(name.startswith('SUDO_') for name in os.environ):
+        stop('sudo를 통한 ansible-safe-run 실행은 허용하지 않습니다.')
+
+    try:
+        account=pwd.getpwuid(uid)
+    except KeyError:
+        stop('현재 Linux 계정을 확인할 수 없습니다.')
+
+    if account.pw_name not in ALLOWED_USERS:
+        stop('허용된 일반 계정(ansible/jth/ksh/cyj)으로 직접 실행해야 합니다.')
+
+    return uid
+
+def validate_keyctl():
+    try:
+        info=os.stat(KEYCTL)
+    except OSError:
+        stop('/usr/bin/keyctl 상태를 확인할 수 없습니다.')
+
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or not os.access(KEYCTL,os.X_OK)
+        or info.st_uid!=0
+        or info.st_mode & (stat.S_IWGRP|stat.S_IWOTH)
+        or info.st_mode & (stat.S_ISUID|stat.S_ISGID)
+    ):
+        stop('/usr/bin/keyctl 소유권 또는 권한 검증 실패')
+
+def supply_credential(kind):
+    name=CREDENTIAL_KEYS.get(kind)
+
+    if name is None:
+        stop('지원하지 않는 Credential 종류')
+
+    uid=os.getuid()
+
+    persistent=parse_key_id(
+        run_keyctl('get_persistent','@s')
+    )
+    require_owned_key(persistent,uid,b'keyring')
+
+    child=find_direct_key(
+        persistent,uid,b'keyring',CREDENTIAL_RING_NAME
+    )
+
+    if child is None:
+        stop(
+            'Kernel Keyring Credential 미등록: '
+            'tools/credential-init을 먼저 실행하세요.'
+        )
+
+    permissions=require_owned_key(
+        child,
+        uid,
+        b'keyring',
+        CREDENTIAL_RING_NAME.encode('ascii'),
+    )
+
+    if permissions & 0x0000ffff:
+        stop(
+            'Credential Keyring의 group/other 권한이 열려 있어 '
+            '사용을 중단합니다.'
+        )
+
+    key_id=find_direct_key(
+        child,uid,b'user',name
+    )
+
+    if key_id is None:
+        stop(
+            '필요한 Kernel Keyring Credential이 없습니다: '
+            'tools/credential-init을 다시 실행하세요.'
+        )
+
+    permissions=require_owned_key(
+        key_id,
+        uid,
+        b'user',
+        name.encode('ascii'),
+    )
+
+    if permissions & 0x0000ffff:
+        stop(
+            'Credential Key의 group/other 권한이 열려 있어 '
+            '사용을 중단합니다.'
+        )
+
+    payload=run_keyctl('pipe',key_id)
+
+    if not payload:
+        stop('Kernel Keyring Credential 값이 비어 있습니다.')
+
+    try:
+        value=payload.decode('utf-8')
+    except UnicodeDecodeError:
+        stop('Kernel Keyring Credential 문자 인코딩 검증 실패')
+
+    if not value:
+        stop('Kernel Keyring Credential 값이 비어 있습니다.')
+
+    return value
+
+def enforce_playbook_policy(name):
+    if name in UNSUPPORTED_SPECIAL_TESTS:
+        stop('특수 CA mutation 테스트는 generic ansible-safe-run에서 실행할 수 없습니다.')
+    if name in MANUAL_ONLY:
+        stop('DB Operator Playbook은 tools/db-operator-login의 수동 --ask-vault-pass 경로를 사용해야 합니다.')
+def cancel(sig, frame):
+    if CHILD:
+        try: os.killpg(CHILD,signal.SIGTERM)
+        except ProcessLookupError: pass
+    raise KeyboardInterrupt
+def resolve(root, name):
+    p=Path(name)
+    if '..' in p.parts or any(ord(c)<32 for c in name): stop('경로 탈출/제어 문자 차단')
+    if not p.is_absolute(): p=root/p if p.parts[0]=='playbooks' else root/'playbooks'/p
+    p=p.resolve()
+    if not p.is_relative_to(root/'playbooks') or not p.is_file() or not p.stat().st_size:
+        stop('playbooks/ 하위의 비어 있지 않은 일반 파일이 필요합니다.')
+    return p
+CONTROL_VARS={'hostvars','groups','inventory_hostname','inventory_hostname_short',
+              'group_names','omit','playbook_dir','ansible_playbook_python'}
+SENSITIVE_KEY=re.compile(r'(^|_)(pass(word|wd)?|secret|token|private_?key|credential|api_?key|access_?key)($|_)',re.I)
+VAR_NAME=re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+def validate_var_key(key, secret_input=False):
+    if not VAR_NAME.fullmatch(key): stop('Extra Var 이름은 단순 변수명이어야 합니다.')
+    if key.startswith('ansible_') or key in CONTROL_VARS:
+        stop('추가 변수로 연결·권한·Inventory 제어값을 바꾸는 것은 허용하지 않습니다.')
+    if not secret_input and SENSITIVE_KEY.search(key):
+        stop('Password/Secret/Token/Private Key/Credential 계열 변수는 --secret-extra-vars로 입력하세요.')
+def validate_user_args(args):
+    """Lexical allow-list only; Ansible still performs the semantic parse."""
+    clean=[]; inspect=False; private_prompt=False; i=0
+    short={'-l':'limit','-t':'tags','-e':'extra'}
+    long={'--limit':'limit','--tags':'tags','--skip-tags':'skip','--extra-vars':'extra'}
+    while i<len(args):
+        arg=args[i]
+        if arg=='--inspect-only':
+            if inspect: stop('--inspect-only 중복 지정')
+            inspect=True; i+=1; continue
+        if arg=='--secret-extra-vars':
+            if private_prompt: stop('--secret-extra-vars 중복 지정')
+            private_prompt=True; i+=1; continue
+        kind=None; value=None
+        if arg in short or arg in long:
+            kind=(short|long)[arg]
+            if i+1>=len(args) or args[i+1].startswith('-'): stop(arg+' 값이 필요합니다.')
+            value=args[i+1]; clean.extend((arg,value)); i+=2
+        elif any(arg.startswith(opt+'=') for opt in long):
+            option,value=arg.split('=',1); kind=long[option]
+            if not value: stop(option+' 값이 필요합니다.')
+            clean.append(arg); i+=1
+        else:
+            stop('지원하지 않는 Ansible 옵션이 포함되어 있습니다.')
+        if kind=='extra':
+            if value.count('=')<1: stop('-e/--extra-vars는 key=value 형식만 허용합니다.')
+            key,_=value.split('=',1); validate_var_key(key)
+    return clean,inspect,private_prompt
+def fingerprint(root, extra=()):
+    result={}
+    collection_root=(root/'.ansible/collections').resolve()
+
+    for directory in (
+        'inventory','playbooks','roles','collections','.ansible/collections',
+        'library','module_utils','action_plugins','callback_plugins',
+        'connection_plugins','filter_plugins','inventory_plugins',
+        'lookup_plugins','vars_plugins'
+    ):
+        base=root/directory
+        if not base.exists():
+            continue
+
+        # 최상위 참조 디렉터리 자체가 symlink인 경우는 계속 차단한다.
+        if base.is_symlink():
+            stop('참조 트리의 최상위 디렉터리 심볼릭 링크는 허용하지 않습니다.')
+
+        for p in base.rglob('*'):
+            # Runtime caches/editor temporaries are not Ansible source inputs.
+            if {'__pycache__','.cache','.git'} & set(p.parts):
+                continue
+            if p.suffix in {'.pyc','.pyo','.retry','.swp','.tmp'} or p.name.endswith(('~','.bak')):
+                continue
+
+            if p.is_symlink():
+                # 일반 프로젝트 영역의 symlink는 계속 fail-closed.
+                if not p.is_relative_to(collection_root):
+                    stop('Collection 외부 참조 트리의 심볼릭 링크는 허용하지 않습니다.')
+
+                try:
+                    link_text=os.readlink(p)
+                except OSError:
+                    stop('Collection 심볼릭 링크 정보를 읽을 수 없습니다.')
+
+                # 확인된 kubernetes.core 구조처럼 상대 symlink만 허용.
+                if Path(link_text).is_absolute():
+                    stop('Collection 내부의 절대경로 심볼릭 링크는 허용하지 않습니다.')
+
+                try:
+                    target=p.resolve(strict=True)
+                except (FileNotFoundError, RuntimeError, OSError):
+                    stop('Collection 내부에 깨졌거나 해석할 수 없는 심볼릭 링크가 있습니다.')
+
+                # 링크 최종 목적지는 반드시 동일 Collection tree 안에 있어야 한다.
+                if not target.is_relative_to(collection_root):
+                    stop('Collection 심볼릭 링크가 Collection tree 밖을 가리킵니다.')
+
+                # 디렉터리/장치 등이 아니라 실제 파일만 허용한다.
+                if not target.is_file():
+                    stop('Collection 심볼릭 링크의 최종 대상이 일반 파일이 아닙니다.')
+
+                # 링크 문자열 자체가 바뀌는 경우도 fingerprint 변화로 감지한다.
+                result[str(p)+'::symlink']=hashlib.sha256(
+                    link_text.encode('utf-8','surrogateescape')
+                ).hexdigest()
+
+                # 링크가 가리키는 실제 파일 내용 변경도 감지한다.
+                result[str(p)+'::target']=hashlib.sha256(
+                    target.read_bytes()
+                ).hexdigest()
+
+                continue
+
+            if p.is_file():
+                result[str(p)]=hashlib.sha256(p.read_bytes()).hexdigest()
+
+    for p in (root/'ansible.cfg',*extra):
+        result[str(p)]=hashlib.sha256(p.read_bytes()).hexdigest()
+
+    return result
+def worker(fn):
+    """Fork/anonymous pipe only; no exec of credential/extra-var values, no timer."""
+    global CHILD
+    r,w=os.pipe(); pid=os.fork()
+    if not pid:
+        os.close(r); os.setsid()
+        signal.signal(signal.SIGTERM,signal.SIG_DFL)
+        signal.signal(signal.SIGINT,signal.SIG_DFL)
+        with open(os.devnull,'wb') as sink:
+            os.dup2(sink.fileno(),1); os.dup2(sink.fileno(),2)
+        try: response={'ok':True,'data':fn()}
+        except NeedVault: response={'need_vault':True}
+        except Stop as ex: response={'error':str(ex)}
+        except BaseException: response={'error':'Ansible 해석/검증 실패. 상세 값은 민감 정보 보호를 위해 숨깁니다.'}
+        with os.fdopen(w,'w') as pipe: json.dump(response,pipe)
+        os._exit(0)
+    CHILD=pid; os.close(w)
+    try:
+        with os.fdopen(r) as pipe: data=pipe.read()
+        _,status=os.waitpid(pid,0); CHILD=None
+        if status or not data: stop('검증 프로세스 비정상 종료')
+        return json.loads(data)
+    finally:
+        if CHILD:
+            try: os.killpg(pid,signal.SIGTERM)
+            except ProcessLookupError: pass
+            os.waitpid(pid,0); CHILD=None
+
+def reviewed_check_override(root, task):
+    """Require commit blob, working file, source line, name and action evidence."""
+    location=str(task.get_path())
+    raw,separator,line_text=location.rpartition(':')
+    if not separator or not line_text.isdigit(): return False
+    path=Path(raw).resolve()
+    if not path.is_relative_to(root) or not path.is_file(): return False
+    rel=path.relative_to(root).as_posix()
+    evidence=REVIEWED_CHECK_FALSE.get(rel)
+    if not evidence: return False
+    commit=subprocess.run(['git','-C',str(root),'cat-file','-e',
+                           f'{REVIEW_BASE_COMMIT}^{{commit}}'],
+                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if commit.returncode: return False
+    prefix=subprocess.run(['git','-C',str(root),'rev-parse','--show-prefix'],
+                          stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    if prefix.returncode: return False
+    git_rel=f"{prefix.stdout.strip().rstrip('/')}/{rel}" if prefix.stdout.strip() else rel
+    reviewed=subprocess.run(['git','-C',str(root),'show',f'{REVIEW_BASE_COMMIT}:{git_rel}'],
+                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    if reviewed.returncode: return False
+    if hashlib.sha256(reviewed.stdout).hexdigest()!=evidence['sha256']: return False
+    if hashlib.sha256(path.read_bytes()).hexdigest()!=evidence['sha256']: return False
+    data=task.get_ds() if hasattr(task,'get_ds') else None
+    name=data.get('name') if isinstance(data,dict) else None
+    return (int(line_text),name,task.action.split('.')[-1]) in evidence['tasks']
+
+def engine(root,pb,args,secrets,private,mode):
+    # Storage/privacy controls only: retain project's timeout/retry/SSH policies.
+    os.chdir(root)
+    # Do not permit an inherited environment to silently replace the project
+    # inventory, connection, become, callback or credential policy.
+    for key in tuple(os.environ):
+        if key.startswith('ANSIBLE_'): del os.environ[key]
+    os.environ.update(ANSIBLE_CONFIG=str(root/'ansible.cfg'),ANSIBLE_LOG_PATH=os.devnull,
+        ANSIBLE_COLLECTIONS_PATH=str(root/'.ansible/collections'),
+        ANSIBLE_CACHE_PLUGIN='memory',ANSIBLE_INVENTORY_CACHE='False',
+        ANSIBLE_RETRY_FILES_ENABLED='False',PYTHONDONTWRITEBYTECODE='1')
+    from ansible.cli import CLI
+    from ansible.cli.playbook import PlaybookCLI
+    from ansible import context, constants as C
+    from ansible.release import __version__
+    from ansible.parsing.vault import VaultLib,VaultSecret
+    from ansible.plugins import loader as plugins
+    from ansible.playbook.block import Block
+    from ansible.playbook.task import Task
+    from ansible.playbook.task_include import TaskInclude
+    from ansible.playbook.role_include import IncludeRole
+    from ansible.playbook.helpers import load_list_of_blocks
+    from ansible.utils.sentinel import Sentinel
+    from ansible.playbook.play_context import PlayContext
+    from ansible.executor.task_executor import TaskExecutor
+    from ansible._internal._templating._engine import TemplateEngine
+    from ansible.plugins.callback import CallbackBase
+    import ansible.cli.playbook as pcm
+    import ansible.executor.playbook_executor as pem
+    if __version__!='2.20.8': stop('검증 adapter 버전은 ansible-core 2.20.8입니다.')
+    if C.CALLBACKS_ENABLED: stop('추가 Callback의 파일/비밀 출력 정책 검토가 필요합니다.')
+    argv=['ansible-playbook','-i','inventory/hosts.yml',str(pb),*args]
+    # Validate with native argparse WITHOUT initializing Ansible's singleton
+    # global CLI context. The real phase must initialize that context exactly once.
+    parser=PlaybookCLI(argv); parser.init_parser()
+    opts=vars(parser.post_process_args(parser.parser.parse_args(argv[1:])))
+    forbidden=('check','diff','syntax','listhosts','listtasks','listtags','step','start_at_task',
+               'flush_cache','ask_pass','ask_become_pass','ask_vault_pass')
+    if any(opts.get(k) for k in forbidden) or opts.get('vault_ids') or opts.get('vault_password_files'):
+        stop('검사/실행 단계 및 인증 옵션은 실행기가 관리합니다.')
+    if [Path(p).resolve() for p in opts['inventory']]!=[root/'inventory/hosts.yml'] or list(opts['args'])!=[str(pb)]:
+        stop('Inventory 교체/추가 Playbook 실행 차단')
+    if opts.get('module_path'): stop('모듈 검색 경로 변경은 별도 검토가 필요합니다.')
+    if C.DEFAULT_VAULT_PASSWORD_FILE or C.DEFAULT_VAULT_IDENTITY_LIST:
+        stop('Vault 파일/스크립트 인증 설정은 메모리 전용 정책과 별도 조정이 필요합니다.')
+    CLI.setup_vault_secrets=staticmethod(lambda *a,**kw:
+        [('default',VaultSecret(secrets['vault'].encode()))] if secrets.get('vault') else [])
+    decrypt=VaultLib.decrypt_and_get_vault_id
+    def guarded(self,*a,**kw):
+        if not self.secrets: raise NeedVault()
+        return decrypt(self,*a,**kw)
+    VaultLib.decrypt_and_get_vault_id=guarded
+    original_lookup=plugins.lookup_loader.get
+    def lookup(name,*a,**kw):
+        # Repository main@ad0ad510 uses only controller-side read-only file and
+        # template lookups. Do not broaden this without a new repository review.
+        if mode!='apply' and name.split('.')[-1] not in {'file','template'}:
+            stop('사전 실행의 lookup 부작용 여부가 미확정입니다.')
+        return original_lookup(name,*a,**kw)
+    plugins.lookup_loader.get=lookup
+    captured={}
+    class Adapter(PlaybookCLI):
+        def ask_passwords(self): return None,secrets.get('become')
+        def _play_prereqs(self):
+            loader,inventory,vm=super()._play_prereqs()
+            if private:
+                from ansible.utils.vars import combine_vars
+                vm._extra_vars=combine_vars(vm.extra_vars,private)
+            for key in vm.extra_vars: validate_var_key(str(key),secret_input=(key in private))
+            captured.update(loader=loader,inventory=inventory,vm=vm)
+            return loader,inventory,vm
+    if mode == 'syntax':
+        class NoExecution:
+            def __init__(self,*a,**kw): stop('Syntax 단계에서 Task 실행 시도 차단')
+        pem.TaskQueueManager=NoExecution
+        rc=Adapter([*argv,'--syntax-check']).run()
+        if rc: stop('Ansible Syntax Check 실패')
+        return {'completed':'syntax'}
+    if mode in ('check','apply'):
+        sudo_checker=plugins.become_loader.get('sudo')
+        def missing_become(result):
+            data=getattr(result,'_result',{}) or {}
+            text='\n'.join(str(data.get(k,'')) for k in ('msg','stderr','module_stderr','module_stdout','exception'))
+            output=text.encode('utf-8','replace')
+            try: native=bool(sudo_checker and sudo_checker.check_missing_password(output))
+            except Exception: native=False
+            return native or 'Missing sudo password' in text or 'sudo: 암호가 필요합니다' in text
+        class Audit(CallbackBase):
+            def __init__(self):
+                super().__init__(); self.bad=False; self.seen=False; self.need_become=False
+            def v2_runner_on_failed(self,result,ignore_errors=False):
+                if mode=='check' and not secrets.get('become') and missing_become(result): self.need_become=True
+                else: self.bad=True
+            def v2_runner_on_unreachable(self,result): self.bad=True
+            def v2_playbook_on_stats(self,stats): self.seen=bool(stats.processed)
+        audit=Audit(); base=pem.TaskQueueManager
+        class Quiet(base):
+            def __init__(self,*a,**kw):
+                if bool(context.CLIARGS.get('check')) != (mode=='check'):
+                    stop('실행 단계와 Ansible Check flag 불일치: 중단')
+                super().__init__(*a,**kw)
+                audit._load_name='s_sh_audit'
+                audit._implemented_callback_methods=frozenset({
+                    'v2_runner_on_failed',
+                    'v2_runner_on_unreachable',
+                    'v2_playbook_on_stats',
+                })
+                self._callback_plugins=[audit]
+        pem.TaskQueueManager=Quiet
+        rc=Adapter([*argv,*(['--check'] if mode=='check' else [])]).run()
+        if mode=='check' and audit.need_become and not audit.bad and audit.seen and not secrets.get('become'):
+            return {'completed':'check','need_become':True}
+        if rc or audit.bad or not audit.seen:
+            stop('Check/적용 실패 또는 완료 통계 미확인. 적용 중이었다면 일부 변경이 남을 수 있습니다.')
+        return {'completed':mode,'need_become':False}
+    base=pcm.PlaybookExecutor
+    # Hard barrier: even a CLI/API regression must never execute original tasks
+    # in an inspection/probe phase.
+    class NoExecution:
+        def __init__(self,*a,**kw): stop('사전 해석 단계에서 Task 실행 시도 차단')
+    pem.TaskQueueManager=NoExecution
+    class Listing(base):
+        def run(self):
+            if not context.CLIARGS.get('listhosts') or self._tqm is not None:
+                stop('Ansible list-only 상태를 확인하지 못했습니다.')
+            result=super().run(); captured['entries']=result; return result
+    pcm.PlaybookExecutor=Listing
+    rc=Adapter([*argv,'--list-hosts','--list-tasks']).run()
+    if rc or not isinstance(captured.get('entries'),list): stop('Ansible 실행 계획 확인 실패')
+    loader,inv,vm=(captured[k] for k in ('loader','inventory','vm'))
+    records=[]; handler_records=[]; unknown=[]; risk=pb.name in RISK; need=False
+    def leaves(items):
+        for obj in items:
+            if isinstance(obj,Block):
+                yield from leaves(obj.block); yield from leaves(obj.rescue); yield from leaves(obj.always)
+            else: yield obj
+    def explicit_value(obj,name):
+        """Find a YAML keyword on the task/block/role inheritance chain."""
+        seen=set(); pending=[obj]
+        while pending:
+            current=pending.pop()
+            if current is None or id(current) in seen: continue
+            seen.add(id(current))
+            data=current.get_ds() if hasattr(current,'get_ds') else None
+            if isinstance(data,dict) and name in data: return data[name]
+            pending.extend((getattr(current,'_parent',None),getattr(current,'_role',None)))
+        return Sentinel
+    def literal_include(value):
+        return isinstance(value,str) and bool(value) and not any(mark in value for mark in ('{{','{%','{#'))
+    def expand_includes(items,play,use_handlers=False,stack=()):
+        """Expand only statically decidable includes through Ansible native loaders."""
+        expanded=[]
+        for obj in items:
+            if isinstance(obj,Block):
+                obj.block=expand_includes(obj.block,play,use_handlers,stack)
+                obj.rescue=expand_includes(obj.rescue,play,use_handlers,stack)
+                obj.always=expand_includes(obj.always,play,use_handlers,stack)
+                expanded.append(obj); continue
+            short=obj.action.split('.')[-1]
+            if short=='include_role':
+                role_name=getattr(obj,'_role_name',None)
+                from_files=getattr(obj,'_from_files',{})
+                if obj.loop is not None or not literal_include(role_name) or any(not literal_include(v) for v in from_files.values()):
+                    stop('실행 시점에 결정되는 include_role은 판정 불가입니다.')
+                key=('role',role_name,tuple(sorted(from_files.items())))
+                if key in stack: stop('순환 include_role은 판정 불가입니다.')
+                role_copy=obj.copy()
+                blocks,_=role_copy.get_block_list(play=play,variable_manager=vm,loader=loader)
+                expanded.extend(expand_includes(blocks,play,use_handlers,(*stack,key))); continue
+            if short=='include_tasks':
+                target=obj.args.get('_raw_params')
+                if obj.loop is not None or not literal_include(target):
+                    stop('실행 시점에 결정되는 include_tasks는 판정 불가입니다.')
+                if obj._role:
+                    filename=loader.path_dwim_relative(obj._role._role_path,
+                        'handlers' if use_handlers else 'tasks',target,is_role=True)
+                else: filename=loader.path_dwim(target)
+                filename=Path(filename).resolve(); key=('tasks',str(filename))
+                if not filename.is_relative_to(root) or not filename.is_file():
+                    stop('정적 include_tasks 파일을 프로젝트 내부에서 확정할 수 없습니다.')
+                if key in stack: stop('순환 include_tasks는 판정 불가입니다.')
+                data=loader.load_from_file(str(filename),trusted_as_template=True)
+                if not isinstance(data,list): stop('include_tasks 파일은 Task 목록이어야 합니다.')
+                include_copy=obj.copy(exclude_parent=True); include_copy._parent=obj._parent
+                blocks=load_list_of_blocks(data,play=play,task_include=include_copy,
+                    role=obj._role,use_handlers=use_handlers,loader=loader,variable_manager=vm)
+                expanded.extend(expand_includes(blocks,play,use_handlers,(*stack,key))); continue
+            expanded.append(obj)
+        return expanded
+    for entry in captured['entries']:
+        entry_name=Path(entry['playbook']).name
+        enforce_playbook_policy(entry_name)
+        risk=risk or entry_name in RISK
+        for play in entry['plays']:
+            # Native host grammar and implicit localhost, including --limit.
+            hosts=inv.get_hosts(play.hosts)
+            if play.vars_prompt and any(v['name'] not in vm.extra_vars for v in play.vars_prompt):
+                stop('Play vars_prompt 값이 미확정입니다. 비표시 추가 변수 입력으로 제공하세요.')
+            blocks=expand_includes(play.compile(),play)
+            handlers=expand_includes(play.handlers,play,use_handlers=True)
+            for host in hosts:
+                hv=vm.get_vars(play=play,host=host)
+                tasks=[(t,False) for t in leaves([b.filter_tagged_tasks(hv) for b in blocks])]
+                tasks.extend((t,True) for t in leaves(handlers))
+                if play.gather_facts is not False:
+                    tasks.insert(0,(Task.load({'action':'ansible.builtin.setup','become':play.become,
+                        'become_user':play.become_user,'become_method':play.become_method,
+                        'connection':play.connection},loader=loader,variable_manager=vm),False))
+                for original,is_handler in tasks:
+                    short=original.action.split('.')[-1]
+                    if short=='meta' and original.implicit: continue
+                    if short in ('include_tasks','include_role'):
+                        stop('정적으로 확정되지 않은 include의 최종 대상은 판정 불가입니다.')
+                    if short in ('add_host','group_by'):
+                        stop('실행 중 Inventory 변경의 최종 대상은 현재 확정 불가입니다.')
+                    variables=vm.get_vars(play=play,host=host,task=original)
+                    tpl=TemplateEngine(loader=loader,variables=variables)
+                    if short=='set_fact' and any(str(k).startswith('ansible_') for k in original.args):
+                        stop('실행 중 연결/권한 변수 변경은 판정 불가입니다.')
+                    if short=='include_vars' and not original.args.get('name'):
+                        stop('이름 공간 없는 변수 로드의 연결/권한 영향 검토가 필요합니다.')
+                    # A connection keyword may legitimately use the task loop variable
+                    # (for example delegate_to: "{{ item }}").  Let Ansible render the
+                    # loop and then resolve each connection context; do not parse it.
+                    connection_fields=('delegate_to','connection','remote_user','become','become_user','become_method','become_flags')
+                    loop_var=original.loop_control.loop_var
+                    loop_sensitive=original.loop is not None and any(
+                        isinstance(getattr(original,f),str) and loop_var in getattr(original,f)
+                        for f in connection_fields)
+                    variants=[variables]
+                    if loop_sensitive:
+                        values=tpl.template(original.loop)
+                        if not isinstance(values,(list,tuple)): stop('연결 속성에 쓰인 loop 결과를 확정할 수 없습니다.')
+                        variants=[]
+                        for value in values:
+                            item_vars=variables.copy(); item_vars[loop_var]=value; variants.append(item_vars)
+                    for task_vars in variants:
+                        tpl=TemplateEngine(loader=loader,variables=task_vars)
+                        t=original.copy()
+                        for field in connection_fields:
+                            setattr(t,field,tpl.template(getattr(t,field)))
+                        delegated,dname=vm.get_delegated_vars_and_hostname(tpl,t,task_vars)
+                        task_vars.update(delegated)
+                        cv=delegated['ansible_delegated_vars'][dname] if dname else task_vars
+                        tpl=TemplateEngine(loader=loader,variables=task_vars)
+                        pc=PlayContext(play,passwords={'become_pass':secrets.get('become')})
+                        pc=pc.set_task_and_variable_override(task=t,variables=task_vars,templar=tpl)
+                        pc.post_validate(tpl)
+                        te=TaskExecutor(host,t,task_vars,pc,loader,plugins,None,vm)
+                        transport=tpl.template(cv.get('ansible_connection',t.connection))
+                        if transport not in ('ssh','local'): stop('이 connection의 안전한 접속 probe가 정의되지 않았습니다.')
+                        te._connection=te._get_connection(cv,tpl,transport); te._set_connection_options(cv,tpl)
+                        conn=te._connection; become=conn.become
+                        user=pwd.getpwuid(os.geteuid()).pw_name if transport=='local' else pc.remote_user
+                        target=become.get_option('become_user') if become else user
+                        if not isinstance(user,str) or not isinstance(target,str): stop('실행/전환 사용자 미확정')
+                        row={'host':host.name,'delegate':dname,'connection':transport,'user':user,'become':bool(become),'become_user':target}
+                        selected_records=handler_records if is_handler else records
+                        new_row=row not in selected_records
+                        if new_row: selected_records.append(row)
+                        if transport=='ssh' and user!='root':
+                            stop('원격 non-root 사용자의 sudo 정책 Evidence가 없어 실행을 금지합니다.')
+                        # Only an explicitly written check_mode: false is an override.
+                        explicit_check=explicit_value(original,'check_mode')
+                        if explicit_check is not Sentinel and tpl.template(explicit_check) is False and not risk:
+                            if not reviewed_check_override(root,original):
+                                data = original.get_ds() if hasattr(original, 'get_ds') else None
+                                task_name = data.get('name') if isinstance(data, dict) else None
+                                task_action = getattr(original, 'action', None) or 'unknown'
+                                unknown.append(
+                                    f"{original.get_path()} | "
+                                    f"Task={task_name or '(이름 없음)'} | "
+                                    f"Module={task_action}"
+                                )
+                        # A Handler is only a potential path until Ansible actually
+                        # notifies it. Never use it to request a credential in probe.
+                        if is_handler: conn.close(); continue
+                        if mode not in ('probe','probe_become') or not new_row: conn.close(); continue
+                        try:
+                            if transport!='local':
+                                rc,out,err=conn.exec_command('id -un',sudoable=False)
+                                if rc or out.decode().strip()!=user:
+                                    stop('SSH 접속이 준비되지 않았습니다. 별도 SSH Bootstrap 작업을 먼저 수행하세요.')
+                            if mode=='probe_become' and become:
+                                if become.name.split('.')[-1]!='sudo': stop('이 Become 방식의 인증 probe가 정의되지 않았습니다.')
+                                command=become.build_become_command('id -un',conn._shell)
+                                try: rc,out,err=conn.exec_command(command,sudoable=True)
+                                except Exception as ex:
+                                    message=str(ex); encoded=message.encode('utf-8','replace')
+                                    if not secrets.get('become') and (
+                                        become.check_missing_password(encoded) or
+                                        'Missing sudo password' in message or
+                                        'sudo: 암호가 필요합니다' in message):
+                                        need=True; continue
+                                    raise
+                                if rc:
+                                    if not secrets.get('become') and become.check_missing_password(out+err): need=True; continue
+                                    stop('Become probe 실패: 비밀번호 필요로 추측하지 않고 중단합니다.')
+                                lines=[x.strip() for x in out.decode().splitlines() if x.strip()]
+                                if not lines or lines[-1]!=target: stop('Become 후 실제 사용자 불일치')
+                        finally: conn.close()
+    if not records: stop('Ansible이 선택한 대상/작업이 없습니다.')
+    if risk and any(row not in records for row in handler_records):
+        stop('위험 Playbook의 잠재 Handler가 별도 접속/권한 구조를 사용하여 실행 전 Credential을 확정할 수 없습니다.')
+    if pb.name=='mariadb_dr_recovery.yml':
+        tags=set(context.CLIARGS['tags'])
+        if not context.CLIARGS['subset'] or len({r['host'] for r in records})!=1 or len(tags)!=1 or not tags<={'restore','replication','maxscale_verify','checklist'}:
+            stop('DR은 -l 대상 1개와 단계 태그 1개가 필요합니다.')
+    return {'targets':records,'potential_handlers':handler_records,'risk':risk,
+            'unknown_check':sorted(set(unknown)),'need_become':need}
+
+def main():
+    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+    signal.signal(signal.SIGINT,cancel); signal.signal(signal.SIGTERM,cancel)
+    validate_execution_user()
+    validate_keyctl()
+    root=Path(sys.argv[1]).resolve()
+    args=[os.fsdecode(v) for v in sys.stdin.buffer.read().split(b'\0')[:-1]]
+    if not args: stop('Playbook 인자 누락')
+    pb=resolve(root,args[0]); args,inspect,private_prompt=validate_user_args(args[1:])
+    enforce_playbook_policy(pb.name)
+    secrets={}; private={}; auth_state={'vault_required':False}
+    if private_prompt:
+        private=json.loads(prompt('민감한 추가 변수 JSON (표시/저장 안 함): ',True))
+        if not isinstance(private,dict): stop('JSON 객체가 필요합니다.')
+        for key in private: validate_var_key(str(key),secret_input=True)
+    os.chdir(root)
+    pb_rel=pb.relative_to(root).as_posix()
+    p=subprocess.run(['git','ls-files','--error-unmatch','--',pb_rel],capture_output=True)
+    if p.returncode: print('경고: Git 추적 여부 미확인')
+    p=subprocess.run(['git','status','--porcelain','--',pb_rel],capture_output=True)
+    if p.stdout: print('경고: 커밋되지 않은 Playbook 변경')
+    files=[]
+    baseline=fingerprint(root,files)
+    def run(mode):
+        if fingerprint(root,files)!=baseline: stop('검증 중 파일 변경: 처음부터 다시 검사하세요.')
+        response=worker(lambda:engine(root,pb,args,secrets,private,mode))
+        if response.get('need_vault'):
+            # Vault need is monotonic for the whole preflight.  A later native
+            # include/probe/check may be the first phase that decrypts data.
+            auth_state['vault_required']=True
+            if secrets.get('vault'): stop('Vault 인증/해석 실패')
+            secrets['vault']=supply_credential('vault')
+            response=worker(lambda:engine(root,pb,args,secrets,private,mode))
+        if not response.get('ok'): stop(response.get('error','Vault 인증/해석 실패'))
+        return response['data']
+    print('========================================\nAnsible Playbook 실행 사전 검사\n========================================')
+    print('Playbook          :',pb.relative_to(root))
+    run('syntax')
+    print('Syntax Check      : 성공')
+    plan=run('inspect')
+    for r in plan['targets']:
+        print('실행 대상/위임    :',r['host'],'/',r['delegate'] or '없음')
+        print('실행 방식/사용자  :',r['connection'],'/',r['user'])
+        print('Become 사용/대상  :',r['become'],'/',r['become_user'])
+    for r in plan['potential_handlers']:
+        print('잠재 Handler 구조 :',r['host'],'/',r['delegate'] or '없음',
+              '/',r['connection'],'/',r['user'],'/ Become',r['become'],'→',r['become_user'])
+    if plan['unknown_check']:
+        print('Check 판정 불가   :', len(plan['unknown_check']), '개 Task (미검토 check_mode:false)')
+        for item in plan['unknown_check']:
+            print('  -', item)
+        print('조치              : 위 Task의 실제 동작을 사람이 검토한 뒤 안전한 Task만 Evidence에 등록해야 합니다.')
+    if inspect:
+        print('접속 상태         : 검사 안 함 (--inspect-only)')
+        print('Vault 인증        :','필요·검증 완료' if auth_state['vault_required'] else '불필요')
+        print('Become 비밀번호   : 판정 안 함')
+        print('필요 Credential\n- Vault           :','필요' if auth_state['vault_required'] else '불필요')
+        print('- Become          : 판정 안 함')
+        print('Check Mode 결과   : 실행 안 함'); return 0
+    if plan['unknown_check']: stop('Check Mode 안전성 판정 불가: 실제 실행을 금지합니다.')
+    result=run('probe')
+    if (result['targets']!=plan['targets'] or
+            result['potential_handlers']!=plan['potential_handlers']):
+        stop('검사 사이 대상/권한 변경')
+    print('접속 상태         : 검증 완료 (local은 SSH 제외)')
+    if plan['risk']:
+        result=run('probe_become')
+        if (result['targets']!=plan['targets'] or
+                result['potential_handlers']!=plan['potential_handlers']):
+            stop('검사 사이 대상/권한 변경')
+        if result['need_become']:
+            secrets['become']=supply_credential('become')
+            result=run('probe_become')
+            if (result['need_become'] or result['targets']!=plan['targets'] or
+                    result['potential_handlers']!=plan['potential_handlers']):
+                stop('Become 재검증 실패')
+        check_result='자동 생략 (운영 영향 Evidence)'
+        print('이 Playbook은 Check Mode에서도 운영 영향 가능성이 있어 자동 사전 실행을 생략합니다.')
+    else:
+        checked=run('check')
+        if checked.get('need_become'):
+            secrets['become']=supply_credential('become')
+            checked=run('check')
+            if checked.get('need_become'): stop('Become 재검증 실패')
+        check_result='성공'
+    print('Vault 인증        :','필요·검증 완료' if auth_state['vault_required'] else '불필요')
+    print('Become 비밀번호   :','필요·검증 완료' if secrets.get('become') else '불필요 (runtime 검사 성공)')
+    print('필요 Credential\n- Vault           :','필요' if auth_state['vault_required'] else '불필요')
+    print('- Become          :','필요' if secrets.get('become') else '불필요')
+    print('Check Mode 결과   :',check_result)
+    print('실행 명령         : ansible-playbook',pb.relative_to(root),'[추가 옵션 값 숨김; 인증은 메모리 전달]')
+    if plan['risk'] and prompt('위험 확인: APPLY '+pb.name+' 을 정확히 입력: ')!='APPLY '+pb.name:
+        print('취소했습니다.'); return 0
+    if prompt('실제 Playbook을 적용하시겠습니까? [y/N] ') not in ('y','yes'):
+        print('취소했습니다.'); return 0
+    run('apply'); print('실제 실행 완료'); return 0
+
+if __name__=='__main__':
+    try: raise SystemExit(main())
+    except Stop as ex: print('중단:',str(ex),file=sys.stderr); raise SystemExit(2)
+    except KeyboardInterrupt:
+        print('중단했습니다. 적용 중이었다면 이미 발생한 변경은 자동 복구되지 않습니다.',file=sys.stderr); raise SystemExit(130)
+    except Exception:
+        print('중단: 입력/환경/해석 오류. 민감 정보 보호를 위해 상세 값은 출력하지 않습니다.',file=sys.stderr); raise SystemExit(2)
+PYTHON
+exec "$root/.venv/bin/python" -I -c "$runner_code" "$root" < <(printf '%s\0' "${args[@]}")
+

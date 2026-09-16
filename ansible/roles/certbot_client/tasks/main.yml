@@ -1,0 +1,79 @@
+---
+- name: Certbot 전용 Python 확인
+  ansible.builtin.stat:
+    path: "{{ certbot_python }}"
+  register: certbot_python_stat
+
+- name: Certbot 전용 Python 계약 검증
+  ansible.builtin.assert:
+    that:
+      - certbot_python_stat.stat.exists | default(false)
+      - certbot_python_stat.stat.executable | default(false)
+    fail_msg: "{{ certbot_python }} 실행 파일이 없어 Certbot 설치를 중단합니다."
+
+- name: Certbot 전용 Python Version 확인
+  ansible.builtin.command:
+    argv:
+      - "{{ certbot_python }}"
+      - --version
+  register: certbot_python_version_result
+  changed_when: false
+
+- name: Certbot 전용 Python Version 검증
+  ansible.builtin.assert:
+    that:
+      - certbot_python_version_result.stdout == 'Python ' ~ certbot_python_version
+    fail_msg: "Certbot 전용 Python Version이 고정값과 다릅니다."
+
+- name: Certbot 전용 Virtualenv 생성
+  ansible.builtin.command:
+    argv:
+      - "{{ certbot_python }}"
+      - -m
+      - venv
+      - "{{ certbot_venv_dir }}"
+    creates: "{{ certbot_venv_dir }}/bin/python"
+
+- name: 고정 Version Certbot 설치
+  ansible.builtin.pip:
+    name: "certbot=={{ certbot_version }}"
+    virtualenv: "{{ certbot_venv_dir }}"
+    virtualenv_command: "{{ certbot_python }} -m venv"
+
+- name: Certbot 실행 경로 연결
+  ansible.builtin.file:
+    src: "{{ certbot_venv_dir }}/bin/certbot"
+    dest: "{{ certbot_command_path }}"
+    state: link
+    owner: root
+    group: root
+
+- name: Gateway DNS-01 수동 발급 도구 설치
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../tools/gateway-certbot-manual"
+    dest: /usr/local/sbin/gateway-certbot-manual
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Gateway ACME 인증서 검증 도구 설치
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../tools/gateway-certbot-verify"
+    dest: /usr/local/sbin/gateway-certbot-verify
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Certbot 설치 Version 확인
+  ansible.builtin.command:
+    argv:
+      - "{{ certbot_command_path }}"
+      - --version
+  register: certbot_installed_version
+  changed_when: false
+
+- name: Certbot 설치 Version 검증
+  ansible.builtin.assert:
+    that:
+      - certbot_installed_version.stdout == 'certbot ' ~ certbot_version
+    fail_msg: "Certbot 설치 Version이 고정값과 다릅니다."
