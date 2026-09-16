@@ -74,6 +74,36 @@
   delegate_to: localhost
   become: false
 
+# ============================================================
+# 작성자: 최유준
+# 작성 날짜: 2026/09/16
+# 목적: argocd-application-controller StatefulSet Ready Validation 추가 (#141)
+# ============================================================
+- name: argocd-application-controller StatefulSet Ready 대기
+  # StatefulSet은 Deployment의 Available Condition에 해당하는 표준 Ready Condition이
+  # 없으므로, wait_condition 대신 readyReplicas == replicas 비교를 until로 직접 확인
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    api_version: apps/v1
+    kind: StatefulSet
+    name: argocd-application-controller
+    namespace: "{{ argocd_namespace }}"
+  register: argocd_app_controller_sts_info
+  until: >
+    (argocd_app_controller_sts_info.resources | length > 0) and
+    (argocd_app_controller_sts_info.resources[0].status.readyReplicas | default(0)) ==
+    (argocd_app_controller_sts_info.resources[0].status.replicas | default(1))
+  retries: "{{ argocd_app_controller_ready_retries }}"
+  delay: "{{ argocd_app_controller_ready_delay }}"
+  delegate_to: localhost
+  become: false
+
+- name: argocd-application-controller StatefulSet 상태 출력 (Evidence 확인용)
+  ansible.builtin.debug:
+    msg: >-
+      argocd-application-controller readyReplicas={{ argocd_app_controller_sts_info.resources[0].status.readyReplicas }}
+      replicas={{ argocd_app_controller_sts_info.resources[0].status.replicas }}
+
 - name: Root Application 배포 (임시 Manifest 생성 → 적용 → 정리)
   when: not ansible_check_mode
   block:
