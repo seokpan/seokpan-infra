@@ -1,0 +1,35 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) kube-apiserver 컨테이너 실행을 위한 Podman 설치 자동화
+#          (STEP 12 선행). loadgen(대표 노드) 1대에만 설치 — kube-apiserver는
+#          단일 컴포넌트이므로 3-member 전체에 설치할 필요 없음.
+#          실제 장애 복구 상황이라면 cp-01이 이미 containerd를 보유하고
+#          있어 이 절차 자체가 불필요함 — 프로젝트 검증 환경(제3의 테스트
+#          서버) 제약으로 인해 추가된 절차임을 기록해둔다.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14
+
+- name: Podman 설치 여부 확인
+  command: podman --version
+  changed_when: false
+  failed_when: false
+  register: dr_podman_check
+
+- name: Podman 미설치 시 설치 (dnf)
+  dnf:
+    name: podman
+    state: present
+  when: dr_podman_check.rc != 0
+  register: dr_podman_install
+
+- name: Podman 버전 재확인
+  command: podman --version
+  changed_when: false
+  register: dr_podman_version
+
+- name: Podman 설치 완료 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_podman_installed: true
+    dr_podman_version: "{{ dr_podman_version.stdout }}"

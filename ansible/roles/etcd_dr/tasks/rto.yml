@@ -1,0 +1,32 @@
+---
+# DR-02 RTO timestamp 기록
+#
+# 호출 시:
+#   dr_rto_stage: restore_start
+#   dr_rto_stage: etcd_quorum_ready
+#   dr_rto_stage: kube_api_ready
+#   dr_rto_stage: object_validation_complete
+#
+# 모든 RTO 기준 timestamp는 loadgen host에 저장한다.
+
+- name: "RTO timestamp 기록 — {{ dr_rto_stage }}"
+  ansible.builtin.command:
+    cmd: date +%s
+  register: dr_rto_timestamp_cmd
+  changed_when: false
+  delegate_to: loadgen
+  run_once: true
+
+- name: "RTO timestamp 저장 — {{ dr_rto_stage }}"
+  ansible.builtin.set_fact:
+    "{{ dr_rto_stage }}": "{{ dr_rto_timestamp_cmd.stdout | int }}"
+  run_once: true
+  delegate_to: loadgen
+  delegate_facts: true
+
+- name: "RTO timestamp 표시 — {{ dr_rto_stage }}"
+  ansible.builtin.debug:
+    msg:
+      stage: "{{ dr_rto_stage }}"
+      epoch: "{{ dr_rto_timestamp_cmd.stdout | int }}"
+  run_once: true

@@ -1,0 +1,43 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02 최종 Restore 실행 안전성 검증
+#          실제 파괴적 작업(restore_init.yml) 직전에
+#          Safety Guard와 Restore Decision 상태를 다시 확인한다.
+#
+#          loadgen에서 생성된 Gate 상태는 hostvars를 통해 확인한다.
+#
+# 최초 작성 시간: 2026-09-15
+
+- name: 대표 노드의 Safety Guard 통과 상태 확인
+  ansible.builtin.assert:
+    that:
+      - hostvars[groups['dr_isolated_etcd'][0]].dr_config_guard_passed | default(false) | bool
+    fail_msg: >
+      Safety Guard 통과 상태를 확인할 수 없습니다.
+      실제 Restore 작업을 실행하지 않습니다.
+    success_msg: "Safety Guard PASS 상태 확인"
+
+- name: 대표 노드의 Restore Decision 확인
+  ansible.builtin.assert:
+    that:
+      - hostvars[groups['dr_isolated_etcd'][0]].dr_restore_decision | default('STOP') == 'RESTORE'
+      - hostvars[groups['dr_isolated_etcd'][0]].dr_restore_decision_passed | default(false) | bool
+    fail_msg: >
+      Restore Decision이 RESTORE 상태가 아닙니다.
+      실제 Restore 작업을 실행하지 않습니다.
+    success_msg: "Restore Decision RESTORE 상태 확인"
+
+- name: 최종 Restore Gate 통과 기록
+  ansible.builtin.set_fact:
+    dr_final_restore_gate_passed: true
+    dr_final_restore_gate_checked_at: "{{ ansible_facts['date_time']['iso8601'] }}"
+
+- name: 최종 Restore Gate 결과 기록
+  ansible.builtin.debug:
+    msg:
+      - "Safety Guard      : PASS"
+      - "Restore Decision  : RESTORE"
+      - "Final Restore Gate: PASS"
+      - "Destructive Restore 작업 진입을 허용합니다."

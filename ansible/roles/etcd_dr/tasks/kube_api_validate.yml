@@ -1,0 +1,55 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery
+# Project: 石나가는 판단(Seokpan)
+# Purpose: DR-02(#176) Kubernetes API 접근 검증 (STEP 14)
+#          kubeconfig 생성 + client cert 인증으로 API 정상 응답 확인.
+#          실패 시 이후 Object 검증(STEP 15) 진행하지 않음.
+# 최초 작성 시간: 2026-09-14 (정확한 시:분:초는 커밋 시점에 맞춰 조정 필요)
+# 수정 시간: 2026-09-14 (버그 수정 — .items가 Jinja에서 dict.items() 메서드로
+#            해석되는 문제. ['items'] 대괄호 표기법으로 교체)
+
+- name: kubectl 설치 여부 확인
+  command: kubectl version --client
+  changed_when: false
+  failed_when: false
+  register: dr_kubectl_check
+
+- name: kubectl 미설치 시 설치 (공식 바이너리 직접 다운로드)
+  get_url:
+    url: "https://dl.k8s.io/release/v1.36.2/bin/linux/amd64/kubectl"
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+  when: dr_kubectl_check.rc != 0
+
+- name: 복구 검증 전용 kubeconfig 생성
+  template:
+    src: dr_kubeconfig.j2
+    dest: "{{ kubeconfig_path }}"
+    mode: "0600"
+
+- name: kubectl cluster-info 확인
+  command: kubectl --kubeconfig={{ kubeconfig_path }} cluster-info
+  changed_when: false
+  register: dr_cluster_info
+
+- name: kubectl get namespaces 확인 (API 정상 응답 + 인증 성공 여부)
+  command: kubectl --kubeconfig={{ kubeconfig_path }} get namespaces -o json
+  changed_when: false
+  register: dr_namespaces_raw
+
+- name: Namespace 목록 파싱
+  set_fact:
+    dr_namespace_list: "{{ (dr_namespaces_raw.stdout | from_json)['items'] | map(attribute='metadata.name') | list }}"
+
+- name: API 응답에 최소 1개 이상 Namespace가 있는지 확인 (kube-system 등 기본 NS)
+  assert:
+    that:
+      - dr_namespace_list | length > 0
+    fail_msg: "Kubernetes API 응답에 Namespace가 하나도 없습니다. API 인증 또는 etcd 연결에 문제가 있을 수 있습니다."
+    success_msg: "Kubernetes API 접근 및 인증 성공 확인 — Namespace {{ dr_namespace_list | length }}개 응답"
+
+- name: API 검증 완료 기록 (Evidence 연계용 fact)
+  set_fact:
+    dr_kube_api_validated: true
+    dr_kube_api_namespace_count: "{{ dr_namespace_list | length }}"
