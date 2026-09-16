@@ -1,0 +1,10 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Purpose: mysqld_exporter service restart handler
+
+- name: Restart mysqld_exporter
+  ansible.builtin.systemd:
+    name: mysqld_exporter
+    state: restarted
+    daemon_reload: true

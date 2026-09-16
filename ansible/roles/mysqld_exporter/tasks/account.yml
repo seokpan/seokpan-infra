@@ -1,0 +1,97 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: mysqld_exporter 전용 DB 계정 생성 및 최소 권한 부여
+#
+# - 실제 Master에서만 실행
+# - 계정 DDL은 MariaDB replication을 통해 Replica에 반영
+# - exporter는 각 DB Guest VM에서 localhost(127.0.0.1)로 접속
+# - update_password: on_create → 기존 계정 비밀번호를 덮어쓰지 않음
+# - 비밀번호는 no_log로 보호
+# - MAX_USER_CONNECTIONS는 실제 현재값을 조회한 후 필요한 경우에만 변경
+
+- name: exporter_svc 계정 생성 (mysqld_exporter 전용)
+  ansible.mariadb.mariadb_user:
+    name: "{{ mysqld_exporter_db_user }}"
+    host: "{{ mysqld_exporter_db_host }}"
+    password: "{{ exporter_svc_password }}"
+    update_password: on_create
+    priv: "{{ mysqld_exporter_db_priv }}"
+    append_privs: true
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysqld_exporter_admin_socket }}"
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
+  no_log: true
+
+- name: exporter_svc MAX_USER_CONNECTIONS 현재값 조회
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mysqld_exporter_admin_socket }}"
+    query:
+      - >-
+        SELECT MAX_USER_CONNECTIONS AS max_user_connections
+        FROM mysql.user
+        WHERE User = '{{ mysqld_exporter_db_user }}'
+          AND Host = '{{ mysqld_exporter_db_host }}'
+  register: mysqld_exporter_max_user_connections_current
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
+  changed_when: false
+  check_mode: false
+
+- name: exporter_svc MAX_USER_CONNECTIONS 조회 결과 검증
+  ansible.builtin.assert:
+    that:
+      - mysqld_exporter_max_user_connections_current.query_result | length == 1
+      - mysqld_exporter_max_user_connections_current.query_result[0] | length == 1
+      - >-
+        mysqld_exporter_max_user_connections_current.query_result[0][0].max_user_connections
+        is not none
+    fail_msg: >-
+      exporter_svc 계정의 MAX_USER_CONNECTIONS 값을 조회하지 못했습니다.
+      query_result={{ mysqld_exporter_max_user_connections_current.query_result }}
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
+
+- name: exporter_svc MAX_USER_CONNECTIONS 설정
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mysqld_exporter_admin_socket }}"
+    query:
+      - >-
+        ALTER USER '{{ mysqld_exporter_db_user }}'@'{{ mysqld_exporter_db_host }}'
+        WITH MAX_USER_CONNECTIONS {{ mysqld_exporter_max_user_connections }}
+  when:
+    - inventory_hostname == mysqld_exporter_master_inventory_hostname
+    - >-
+      (mysqld_exporter_max_user_connections_current.query_result[0][0].max_user_connections | int)
+      != (mysqld_exporter_max_user_connections | int)
+
+- name: exporter_svc MAX_USER_CONNECTIONS 최종값 조회
+  ansible.mariadb.mariadb_query:
+    login_user: root
+    login_unix_socket: "{{ mysqld_exporter_admin_socket }}"
+    query:
+      - >-
+        SELECT MAX_USER_CONNECTIONS AS max_user_connections
+        FROM mysql.user
+        WHERE User = '{{ mysqld_exporter_db_user }}'
+          AND Host = '{{ mysqld_exporter_db_host }}'
+  register: mysqld_exporter_max_user_connections_final
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
+  changed_when: false
+  check_mode: false
+
+- name: exporter_svc MAX_USER_CONNECTIONS 최종값 검증
+  ansible.builtin.assert:
+    that:
+      - mysqld_exporter_max_user_connections_final.query_result | length == 1
+      - mysqld_exporter_max_user_connections_final.query_result[0] | length == 1
+      - >-
+        (mysqld_exporter_max_user_connections_final.query_result[0][0].max_user_connections | int)
+        == (mysqld_exporter_max_user_connections | int)
+    fail_msg: >-
+      exporter_svc MAX_USER_CONNECTIONS 검증 실패:
+      expected={{ mysqld_exporter_max_user_connections }},
+      actual={{ mysqld_exporter_max_user_connections_final.query_result }}
+  when: inventory_hostname == mysqld_exporter_master_inventory_hostname
