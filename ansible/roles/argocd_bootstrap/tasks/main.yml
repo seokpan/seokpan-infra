@@ -118,6 +118,9 @@
               - BackgroundScanReport
               - ClusterBackgroundScanReport
               - UpdateRequest
+        resource.customizations.ignoreDifferences.discovery.k8s.io_EndpointSlice: |
+          jqPathExpressions:
+            - .endpoints[].conditions
   delegate_to: localhost
   become: false
   register: argocd_cm_exclusions_patch
