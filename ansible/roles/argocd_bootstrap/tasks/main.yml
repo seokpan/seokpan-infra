@@ -31,17 +31,72 @@
   delegate_to: localhost
   become: false
 
-- name: "Argo CD Manifest Server-Side Apply (대형 CRD annotation 한도 회피, 재검증 대상)"
+# ============================================================
+# 목적: install.yaml 전체 SSA가 argocd-cm.resource.exclusions를 매 실행마다
+# upstream 기본값으로 되돌리고, 바로 다음 전용 patch 태스크(동일 field_manager)가
+# 다시 프로젝트 값으로 되돌리는 순환 changed 제거 (리뷰 코멘트 반영)
+# argocd-cm 리소스는 이후 전용 태스크가 단독 소유하도록 install manifest
+# 적용 대상에서 제외한다.
+# ============================================================
+- name: install manifest 문서 목록 로드
+  ansible.builtin.set_fact:
+    argocd_install_docs_all: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | select('mapping') | list
+         | rejectattr('kind', 'undefined') | list }}
+  delegate_to: localhost
+  become: false
+
+- name: install manifest에서 argocd-cm·argocd-server Deployment 문서 제외 (필드 소유권 순환 방지)
+  # argocd-cm: resource.exclusions 필드 순환 (#198 리뷰 반영, 기존 해결)
+  # argocd-server Deployment: spec.replicas 필드가 install.yaml에는 없어
+  # 매 실행마다 동일 field_manager의 재apply로 소유권이 탈락→재획득을 반복하던 문제 (신규 발견)
+  ansible.builtin.set_fact:
+    argocd_install_docs_no_cm: >-
+      {{ (argocd_install_docs_all
+          | rejectattr('kind', 'in', ['ConfigMap', 'Deployment']) | list)
+         + (argocd_install_docs_all | selectattr('kind', 'equalto', 'ConfigMap')
+            | rejectattr('metadata.name', 'equalto', 'argocd-cm') | list)
+         + (argocd_install_docs_all | selectattr('kind', 'equalto', 'Deployment')
+            | rejectattr('metadata.name', 'equalto', 'argocd-server') | list) }}
+  delegate_to: localhost
+  become: false
+
+- name: 필터링된 install manifest 임시 파일 준비
+  ansible.builtin.tempfile:
+    state: file
+    prefix: "argocd-install-no-cm-"
+    suffix: ".yaml"
+  register: argocd_install_no_cm_temp
+  delegate_to: localhost
+  become: false
+
+- name: 필터링된 install manifest 기록 (argocd-cm 제외본)
+  ansible.builtin.copy:
+    dest: "{{ argocd_install_no_cm_temp.path }}"
+    content: "{{ argocd_install_docs_no_cm | map('to_nice_yaml') | join('---\n') }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+
+- name: "Argo CD Manifest Server-Side Apply (argocd-cm 제외, 대형 CRD annotation 한도 회피)"
   kubernetes.core.k8s:
     kubeconfig: "{{ argocd_kubeconfig }}"
     namespace: "{{ argocd_namespace }}"
-    src: "{{ argocd_manifest_local_path }}"
+    src: "{{ argocd_install_no_cm_temp.path }}"
     state: present
     apply: true
     server_side_apply:
       field_manager: "{{ argocd_field_manager }}"
       force_conflicts: true
   register: argocd_apply_result
+  delegate_to: localhost
+  become: false
+
+- name: 필터링된 install manifest 임시 파일 제거
+  ansible.builtin.file:
+    path: "{{ argocd_install_no_cm_temp.path }}"
+    state: absent
   delegate_to: localhost
   become: false
 
