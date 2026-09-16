@@ -41,3 +41,7 @@ argocd_ready_delay: 10
 argocd_ready_timeout: "{{ argocd_ready_retries | int * argocd_ready_delay | int }}"
 root_app_sync_retries: 20
 root_app_sync_delay: 15
+
+# argocd-application-controller StatefulSet Ready 대기 (#141)
+argocd_app_controller_ready_retries: 30
+argocd_app_controller_ready_delay: 10
