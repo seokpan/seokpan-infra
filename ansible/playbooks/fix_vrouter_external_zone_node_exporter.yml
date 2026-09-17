@@ -1,0 +1,67 @@
+# 작성자: 최유준 / 작성 날짜: 2026/09/17
+#
+# 목적: #205 대응 - vrouter-02/03/04의 external zone(ens160)에
+#       K8s worker 대역에서 유입되는 9100/tcp(node_exporter)만
+#       최소 허용(rich rule)하도록 firewalld 설정 추가.
+#       기존 install_node_exporter_external.yml의 internal zone
+#       9100/tcp 허용은 유지하며, 이 플레이북은 external zone에
+#       대해서만 별도로 좁은 범위의 rich rule을 추가한다.
+#
+# 전제: 이유빈님 확인 완료 후 실행 (단독 결정 지양 원칙)
+#       - 전체 external zone 개방이 아닌, 아래 두 CIDR만 허용
+#         192.168.51.0/24 (K8s worker 대역)
+#         192.168.52.0/24 (K8s worker 대역)
+
+- name: vrouter external zone에 node_exporter(9100/tcp) 최소 허용
+  hosts: vrouter-02:vrouter-03:vrouter-04
+  become: true
+
+  vars:
+    node_exporter_port: 9100
+    allowed_worker_cidrs:
+      - 192.168.51.0/24
+      - 192.168.52.0/24
+
+  tasks:
+    - name: 현재 적용된 zone/인터페이스 확인 (read-only)
+      ansible.builtin.command: firewall-cmd --get-active-zones
+      register: active_zones
+      changed_when: false
+      check_mode: false
+
+    - name: active zone 정보 출력
+      ansible.builtin.debug:
+        var: active_zones.stdout_lines
+
+    - name: external zone에 worker 대역 → 9100/tcp rich rule 추가 (permanent)
+      ansible.posix.firewalld:
+        zone: external
+        rich_rule: >-
+          rule family="ipv4"
+          source address="{{ item }}"
+          port protocol="tcp" port="{{ node_exporter_port }}"
+          accept
+        permanent: true
+        immediate: true
+        state: enabled
+      loop: "{{ allowed_worker_cidrs }}"
+      loop_control:
+        label: "{{ item }} -> tcp/{{ node_exporter_port }}"
+      register: firewalld_result
+
+    - name: rich rule 적용 결과(호스트별 changed 여부) 확인
+      ansible.builtin.debug:
+        msg: "{{ item.item }} -> changed={{ item.changed }}"
+      loop: "{{ firewalld_result.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 적용된 external zone rich rule 재확인 (read-only)
+      ansible.builtin.command: firewall-cmd --zone=external --list-rich-rules
+      register: external_rich_rules
+      changed_when: false
+      check_mode: false
+
+    - name: 적용 결과 출력
+      ansible.builtin.debug:
+        var: external_rich_rules.stdout_lines
