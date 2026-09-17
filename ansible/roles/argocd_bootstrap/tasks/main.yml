@@ -93,6 +93,68 @@
   delegate_to: localhost
   become: false
 
+- name: 대형 CRD 정상 생성 확인 (262144 byte 이슈 재검증)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ argocd_large_crds }}"
+  register: argocd_large_crd_check
+  failed_when: argocd_large_crd_check.resources | length == 0
+  delegate_to: localhost
+  become: false
+
+- name: argocd-server Deployment 원본 정의 추출 (install manifest 내 해당 문서만)
+  ansible.builtin.set_fact:
+    argocd_server_deploy_original_def: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | selectattr('kind', 'defined')
+         | selectattr('kind', 'equalto', 'Deployment')
+         | selectattr('metadata.name', 'equalto', 'argocd-server')
+         | first }}
+  delegate_to: localhost
+  become: false
+
+- name: "argocd-server Deployment spec.replicas 명시적 SSA 관리 (#198)"
+  # install manifest 전체 SSA 대상에서 argocd-server Deployment를 제외했으므로
+  # (위 argocd-cm·argocd-server 필터링 참고), 원본 정의를 그대로 재적용하지 않으면
+  # 신규 클러스터 bootstrap 시 이 Deployment가 아예 생성되지 않는다.
+  # replicas만 명시적으로 관리하고 나머지 spec/labels는 upstream 원본 그대로 유지.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+      force_conflicts: true
+    definition: >-
+      {{ argocd_server_deploy_original_def
+         | combine({
+             'metadata': {'namespace': argocd_namespace},
+             'spec': {'replicas': argocd_server_replicas}
+           }, recursive=true) }}
+  delegate_to: localhost
+  become: false
+
+- name: Argo CD 핵심 Deployment Ready 대기
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    kind: Deployment
+    namespace: "{{ argocd_namespace }}"
+    name: "{{ item }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ argocd_ready_timeout }}"
+  loop:
+    - argocd-server
+    - argocd-repo-server
+    - argocd-applicationset-controller
+  delegate_to: localhost
+  become: false
+
 - name: 필터링된 install manifest 임시 파일 제거
   ansible.builtin.file:
     path: "{{ argocd_install_no_cm_temp.path }}"
@@ -129,6 +191,9 @@
              'metadata': {'namespace': argocd_namespace},
              'data': {'resource.exclusions': argocd_cm_resource_exclusions_override}
            }, recursive=true) }}
+  delegate_to: localhost
+  become: false
+
 - name: argocd-application-controller StatefulSet Ready 대기
   # StatefulSet은 Deployment의 Available Condition에 해당하는 표준 Ready Condition이
   # 없으므로, wait_condition 대신 until로 직접 확인한다.

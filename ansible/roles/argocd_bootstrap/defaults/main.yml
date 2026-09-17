@@ -99,3 +99,5 @@ argocd_cm_resource_exclusions_override: |
       - BackgroundScanReport
       - ClusterBackgroundScanReport
       - UpdateRequest
+
+argocd_server_replicas: 1
