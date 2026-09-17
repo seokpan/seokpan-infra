@@ -1,0 +1,24 @@
+# 작성자: 최유준 / 작성 날짜: 2026/09/17
+---
+- name: Install node_exporter on external VRouter and Ansible Controller hosts
+  hosts: vrouters:ansible_controller
+  become: true
+  roles:
+    - node_exporter_linux
+  post_tasks:
+    - name: Open node_exporter port (9100/tcp) in firewalld internal zone
+      ansible.posix.firewalld:
+        port: 9100/tcp
+        zone: internal
+        permanent: true
+        immediate: true
+        state: enabled
+      when: "'vrouters' in group_names"
+
+    - name: Open node_exporter port (9100/tcp) in firewalld default zone
+      ansible.posix.firewalld:
+        port: 9100/tcp
+        permanent: true
+        immediate: true
+        state: enabled
+      when: "'ansible_controller' in group_names"
