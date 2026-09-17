@@ -28,7 +28,18 @@ haproxy_firewall_ports:
   - 443
   - 6443
   - 3306
+  - 8404
 
+
+# ============================================================
+# Prometheus Native Metrics (HAProxy 2.0+ 내장 모듈)
+# 실IP(10.1.93.78)에만 바인딩 — VIP(haproxy_bind_address)는 기존
+# 4개 서비스(HTTP/HTTPS/K8s API/DB) 전용으로 유지, 메트릭 트래픽과 분리
+# ============================================================
+
+haproxy_stats_enabled: true
+haproxy_stats_bind_address: "10.1.93.78"
+haproxy_stats_port: 8404
 
 # ============================================================
 # HTTP / HTTPS Worker NodePort
