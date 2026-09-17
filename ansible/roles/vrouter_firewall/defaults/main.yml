@@ -6,3 +6,8 @@ int_to_ext_policy: int-to-ext
 ext_to_int_policy: ext-to-int
 
 private_network: 192.168.0.0/16
+
+node_exporter_port: 9100
+worker_allow_cidrs:
+  - 192.168.51.0/24
+  - 192.168.52.0/24
