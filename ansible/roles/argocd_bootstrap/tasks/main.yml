@@ -31,99 +31,67 @@
   delegate_to: localhost
   become: false
 
-- name: "Argo CD Manifest Server-Side Apply (대형 CRD annotation 한도 회피, 재검증 대상)"
+# ============================================================
+# 목적: install.yaml 전체 SSA가 argocd-cm.resource.exclusions를 매 실행마다
+# upstream 기본값으로 되돌리고, 바로 다음 전용 patch 태스크(동일 field_manager)가
+# 다시 프로젝트 값으로 되돌리는 순환 changed 제거 (리뷰 코멘트 반영)
+# argocd-cm 리소스는 이후 전용 태스크가 단독 소유하도록 install manifest
+# 적용 대상에서 제외한다.
+# ============================================================
+- name: install manifest 문서 목록 로드
+  ansible.builtin.set_fact:
+    argocd_install_docs_all: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | select('mapping') | list
+         | rejectattr('kind', 'undefined') | list }}
+  delegate_to: localhost
+  become: false
+
+- name: install manifest에서 argocd-cm·argocd-server Deployment 문서 제외 (필드 소유권 순환 방지)
+  # argocd-cm: resource.exclusions 필드 순환 (#198 리뷰 반영, 기존 해결)
+  # argocd-server Deployment: spec.replicas 필드가 install.yaml에는 없어
+  # 매 실행마다 동일 field_manager의 재apply로 소유권이 탈락→재획득을 반복하던 문제 (신규 발견)
+  ansible.builtin.set_fact:
+    argocd_install_docs_no_cm: >-
+      {{ (argocd_install_docs_all
+          | rejectattr('kind', 'in', ['ConfigMap', 'Deployment']) | list)
+         + (argocd_install_docs_all | selectattr('kind', 'equalto', 'ConfigMap')
+            | rejectattr('metadata.name', 'equalto', 'argocd-cm') | list)
+         + (argocd_install_docs_all | selectattr('kind', 'equalto', 'Deployment')
+            | rejectattr('metadata.name', 'equalto', 'argocd-server') | list) }}
+  delegate_to: localhost
+  become: false
+
+- name: 필터링된 install manifest 임시 파일 준비
+  ansible.builtin.tempfile:
+    state: file
+    prefix: "argocd-install-no-cm-"
+    suffix: ".yaml"
+  register: argocd_install_no_cm_temp
+  delegate_to: localhost
+  become: false
+
+- name: 필터링된 install manifest 기록 (argocd-cm 제외본)
+  ansible.builtin.copy:
+    dest: "{{ argocd_install_no_cm_temp.path }}"
+    content: "{{ argocd_install_docs_no_cm | map('to_nice_yaml') | join('---\n') }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+
+- name: "Argo CD Manifest Server-Side Apply (argocd-cm 제외, 대형 CRD annotation 한도 회피)"
   kubernetes.core.k8s:
     kubeconfig: "{{ argocd_kubeconfig }}"
     namespace: "{{ argocd_namespace }}"
-    src: "{{ argocd_manifest_local_path }}"
+    src: "{{ argocd_install_no_cm_temp.path }}"
     state: present
+    apply: true
     server_side_apply:
       field_manager: "{{ argocd_field_manager }}"
       force_conflicts: true
   register: argocd_apply_result
   delegate_to: localhost
   become: false
-
-- name: argocd-cm resource.exclusions에서 EndpointSlice 제외 해제 (Endpoints는 유지) 
-  # upstream install.yaml(v3.4.7) 기본값에 discovery.k8s.io/EndpointSlice가 포함되어 있어,
-  # 외부 VM Exporter용으로 수동 생성한 EndpointSlice(observability/servicemonitor-external-exporters.yaml)가
-  # ArgoCD의 추적/Sync/Diff 대상에서 완전히 제외되는 문제 해결.
-  # apiGroups: ['', 'discovery.k8s.io'] / kinds: [Endpoints, EndpointSlice] 항목만
-  # Endpoints 단독으로 축소하고, 나머지 upstream 기본 exclusions(Lease, Authn/Authz,
-  # CertificateSigningRequest/CertificateRequest, Cilium, Kyverno)는 그대로 유지.
-  # 동일 field_manager("{{ argocd_field_manager }}")로 SSA하여 초기 설치 apply와
-  # 필드 소유권 충돌 없이 병합됨.
-  kubernetes.core.k8s:
-    kubeconfig: "{{ argocd_kubeconfig }}"
-    state: present
-    server_side_apply:
-      field_manager: "{{ argocd_field_manager }}"
-    definition:
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: argocd-cm
-        namespace: "{{ argocd_namespace }}"
-      data:
-        resource.exclusions: |
-          ### Network resources created by the Kubernetes control plane and excluded to reduce the number of watched events and UI clutter
-          - apiGroups:
-              - ''
-            kinds:
-              - Endpoints
-          ### Internal Kubernetes resources excluded reduce the number of watched events
-          - apiGroups:
-              - coordination.k8s.io
-            kinds:
-              - Lease
-          ### Internal Kubernetes Authz/Authn resources excluded reduce the number of watched events
-          - apiGroups:
-              - authentication.k8s.io
-              - authorization.k8s.io
-            kinds:
-              - SelfSubjectReview
-              - TokenReview
-              - LocalSubjectAccessReview
-              - SelfSubjectAccessReview
-              - SelfSubjectRulesReview
-              - SubjectAccessReview
-          ### Intermediate Certificate Request excluded reduce the number of watched events
-          - apiGroups:
-              - certificates.k8s.io
-            kinds:
-              - CertificateSigningRequest
-          - apiGroups:
-              - cert-manager.io
-            kinds:
-              - CertificateRequest
-          ### Cilium internal resources excluded reduce the number of watched events and UI Clutter
-          - apiGroups:
-              - cilium.io
-            kinds:
-              - CiliumIdentity
-              - CiliumEndpoint
-              - CiliumEndpointSlice
-          ### Kyverno intermediate and reporting resources excluded reduce the number of watched events and improve performance
-          - apiGroups:
-              - kyverno.io
-              - reports.kyverno.io
-              - wgpolicyk8s.io
-            kinds:
-              - PolicyReport
-              - ClusterPolicyReport
-              - EphemeralReport
-              - ClusterEphemeralReport
-              - AdmissionReport
-              - ClusterAdmissionReport
-              - BackgroundScanReport
-              - ClusterBackgroundScanReport
-              - UpdateRequest
-        resource.customizations.ignoreDifferences.discovery.k8s.io_EndpointSlice: |
-          jqPathExpressions:
-            - .endpoints[].conditions
-  delegate_to: localhost
-  become: false
-  register: argocd_cm_exclusions_patch
 
 - name: 대형 CRD 정상 생성 확인 (262144 byte 이슈 재검증)
   kubernetes.core.k8s_info:
@@ -134,6 +102,38 @@
   loop: "{{ argocd_large_crds }}"
   register: argocd_large_crd_check
   failed_when: argocd_large_crd_check.resources | length == 0
+  delegate_to: localhost
+  become: false
+
+- name: argocd-server Deployment 원본 정의 추출 (install manifest 내 해당 문서만)
+  ansible.builtin.set_fact:
+    argocd_server_deploy_original_def: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | selectattr('kind', 'defined')
+         | selectattr('kind', 'equalto', 'Deployment')
+         | selectattr('metadata.name', 'equalto', 'argocd-server')
+         | first }}
+  delegate_to: localhost
+  become: false
+
+- name: "argocd-server Deployment spec.replicas 명시적 SSA 관리 (#198)"
+  # install manifest 전체 SSA 대상에서 argocd-server Deployment를 제외했으므로
+  # (위 argocd-cm·argocd-server 필터링 참고), 원본 정의를 그대로 재적용하지 않으면
+  # 신규 클러스터 bootstrap 시 이 Deployment가 아예 생성되지 않는다.
+  # replicas만 명시적으로 관리하고 나머지 spec/labels는 upstream 원본 그대로 유지.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+      force_conflicts: true
+    definition: >-
+      {{ argocd_server_deploy_original_def
+         | combine({
+             'metadata': {'namespace': argocd_namespace},
+             'spec': {'replicas': argocd_server_replicas}
+           }, recursive=true) }}
   delegate_to: localhost
   become: false
 
@@ -155,11 +155,45 @@
   delegate_to: localhost
   become: false
 
-# ============================================================
-# 작성자: 최유준
-# 작성 날짜: 2026/09/16
-# 목적: argocd-application-controller StatefulSet Ready Validation 추가 (#141)
-# ============================================================
+- name: 필터링된 install manifest 임시 파일 제거
+  ansible.builtin.file:
+    path: "{{ argocd_install_no_cm_temp.path }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+
+- name: argocd-cm 원본 정의 추출 (install manifest 내 해당 문서만)
+  ansible.builtin.set_fact:
+    argocd_cm_original_def: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | selectattr('kind', 'defined')
+         | selectattr('kind', 'equalto', 'ConfigMap')
+         | selectattr('metadata.name', 'equalto', 'argocd-cm')
+         | first }}
+  delegate_to: localhost
+  become: false
+
+- name: "argocd-cm resource.exclusions 병합 SSA (upstream 기본 data/labels 보존, #198 회귀 수정)"
+  # 이전 방식(argocd-cm을 install manifest 적용 대상에서 완전히 제외 + resource.exclusions만
+  # 담은 partial definition SSA)은 신규 클러스터 bootstrap 시 ignoreResourceUpdates 등
+  # upstream 기본 data 키와 기본 labels가 생성되지 않는 회귀를 유발함 (재리뷰 지적).
+  # install manifest에서 argocd-cm 원본 전체를 추출해 resource.exclusions 값만
+  # combine으로 덮어쓴 완전한 정의를 SSA -> 나머지 data/labels는 upstream 원본 그대로 유지.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+    definition: >-
+      {{ argocd_cm_original_def
+         | combine({
+             'metadata': {'namespace': argocd_namespace},
+             'data': {'resource.exclusions': argocd_cm_resource_exclusions_override}
+           }, recursive=true) }}
+  delegate_to: localhost
+  become: false
+
 - name: argocd-application-controller StatefulSet Ready 대기
   # StatefulSet은 Deployment의 Available Condition에 해당하는 표준 Ready Condition이
   # 없으므로, wait_condition 대신 until로 직접 확인한다.
@@ -213,6 +247,7 @@
         kubeconfig: "{{ argocd_kubeconfig }}"
         src: "{{ root_application_manifest_temp.path }}"
         state: present
+        apply: true
         server_side_apply:
           field_manager: "{{ argocd_field_manager }}"
           force_conflicts: true
