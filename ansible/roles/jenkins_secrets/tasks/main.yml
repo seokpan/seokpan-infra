@@ -143,6 +143,33 @@
   no_log: true
 
 # 작성자: 최유준
+# 작성 날짜: 2026-09-18
+#
+# jenkins-gitops-promotion-credential: seokpan-app#98 / seokpan-gitops#57 Step 9의
+# canonical GitOps Promotion Credential (PR #125 리뷰 결과 - App #98 계약으로 일원화 확정,
+# 2026-09-18 팀원 확인 완료). 기존 jenkins-github-gitops-credential과 값은 동일(같은 PAT/계정)
+# 하나 계약 이름만 다름 — 마이그레이션 기간 동안 두 Secret이 공존하며, App #98 Promotion
+# Stage E2E 검증 완료 후 jenkins-github-gitops-credential은 별도 후속 PR로 제거 예정.
+- name: jenkins-gitops-promotion-credential Secret 적용 (canonical GitOps Promotion 계약)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: jenkins-gitops-promotion-credential
+        namespace: cicd
+      stringData:
+        username: "{{ github_gitops_bot_username }}"
+        password: "{{ vault_github_gitops_bot_pat }}"
+  register: jenkins_gitops_promotion_credential_secret_apply
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+# 작성자: 최유준
 # 작성 날짜: 2026-09-08
 #
 # harbor-api-credential: Harbor REST API 전용 Robot Account(robot$seokpan+seokpan-api)의
@@ -245,6 +272,7 @@
     - jenkins-harbor-api-credential
     - harbor-pull-secret
     - jenkins-github-gitops-credential
+    - jenkins-gitops-promotion-credential
   register: jenkins_secrets_summary
   delegate_to: localhost
   become: false
