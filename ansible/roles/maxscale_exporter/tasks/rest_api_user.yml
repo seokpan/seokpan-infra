@@ -1,0 +1,15 @@
+---
+- name: MaxScale REST API 유저 목록 조회
+  ansible.builtin.command:
+    cmd: maxctrl --tsv list users
+  register: maxscale_users
+  changed_when: false
+
+- name: maxscale_exporter REST API 유저 생성 (없을 때만)
+  ansible.builtin.command:
+    cmd: >
+      maxctrl create user maxscale_exporter '{{ maxscale_exporter_password }}'
+      --type=basic
+  when: "'maxscale_exporter' not in maxscale_users.stdout"
+  changed_when: true
+  no_log: true

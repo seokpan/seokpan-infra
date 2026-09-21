@@ -1,0 +1,12 @@
+---
+# Owner: 김상희
+# Scope: Data, Storage & Recovery / Observability
+# Project: 石나가는 판단
+# Purpose: Install and configure maxscale_exporter on MaxScale Guest VM
+
+- name: Install and configure maxscale_exporter on MaxScale Guest VM
+  hosts: maxscale
+  become: true
+  gather_facts: true
+  roles:
+    - maxscale_exporter
