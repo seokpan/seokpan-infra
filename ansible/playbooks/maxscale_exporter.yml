@@ -2,9 +2,9 @@
 # Owner: 김상희
 # Scope: Data, Storage & Recovery / Observability
 # Project: 石나가는 판단
-# Purpose: Install and configure maxscale_exporter on MaxScale Guest VM
+# Purpose: Provision MaxScale REST API read-only user for maxscale_exporter (exporter install is deferred to phase 2)
 
-- name: Install and configure maxscale_exporter on MaxScale Guest VM
+- name: Provision MaxScale REST API read-only user (maxscale_exporter)
   hosts: maxscale
   become: true
   gather_facts: true
