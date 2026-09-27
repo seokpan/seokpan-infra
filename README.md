@@ -4,6 +4,14 @@
 
 실제 애플리케이션 배포 상태는 [`seokpan-gitops`](https://github.com/seokpan/seokpan-gitops), 애플리케이션 소스는 [`seokpan-app`](https://github.com/seokpan/seokpan-app), 설계·검증 문서는 [`seokpan-docs`](https://github.com/seokpan/seokpan-docs)에서 관리합니다.
 
+## 인프라 구성
+
+![Ansible 관리 대상인 16개 VM의 역할별 구성](docs/images/infrastructure-scope.svg)
+
+[Inventory](ansible/inventory/hosts.yml)에 정의된 16개 VM을 역할별로 묶은 그림입니다. Control Plane 3대·Worker 2대로 Kubernetes를 구성하고, MariaDB·MaxScale·Harbor·NFS는 별도 VM에서 운영합니다. 1차 MVP의 LB와 MaxScale은 각각 1대입니다.
+
+Ansible은 서버와 클러스터 기반을 구성하고, 클러스터에 배포할 애플리케이션·플랫폼 리소스는 `seokpan-gitops`가 관리합니다. 그림은 관리 대상의 구분이며 패킷 경로나 물리 호스트별 배치를 나타내지는 않습니다.
+
 ## 담당과 역할
 
 | 담당자 | 영역 | 주요 작업 |
