@@ -40,7 +40,7 @@ seokpan-infra/
 
 ## 핵심 기술과 구현 영역
 
-Ansible Role을 기능 단위로 나누고 각 기술을 서버·네트워크·클러스터 구성에 적용했습니다. 전체 목록 대신 영역별 대표 코드 위치만 안내합니다. 각 역할의 세부 태스크는 링크된 디렉터리에서 직접 확인하세요.
+VMware·CentOS Stream 9 VM을 Ansible로 구성하고, HAProxy·kubeadm·containerd·Calico·MariaDB·MaxScale·NFS를 영역별 Role로 관리합니다. 전체 목록 대신 대표 코드 위치만 안내합니다. 각 Role의 세부 태스크는 링크된 디렉터리에서 확인할 수 있습니다.
 
 | 영역 | 대표 Role / Playbook | 코드 |
 |---|---|---|
