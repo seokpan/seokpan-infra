@@ -1,29 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="630" viewBox="0 0 1000 630" role="img" aria-labelledby="title desc"><title id="title">Infrastructure: the first-project MVP</title><desc id="desc">VM inventory and Ansible ownership / 4 physical hosts · 16 VMs</desc><rect width="1000" height="630" rx="20" fill="#f6f8fc"/>
-<text x="32" y="44" font-family="Arial,Helvetica,sans-serif" font-size="26" font-weight="700" fill="#12253f">Infrastructure: the first-project MVP</text>
-<text x="32" y="74" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="400" fill="#42526b">VM inventory and Ansible ownership / 4 physical hosts · 16 VMs</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="558" viewBox="0 0 1000 558" role="img" aria-labelledby="title desc"><title id="title">1차 프로젝트 인프라 구성</title><desc id="desc">물리 호스트 4대 · VM 16대 / Ansible Inventory 기준</desc><rect width="1000" height="630" rx="20" fill="#f6f8fc"/>
+<text x="32" y="44" font-family="Arial,Helvetica,sans-serif" font-size="26" font-weight="700" fill="#12253f">1차 프로젝트 인프라 구성</text>
+<text x="32" y="74" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="400" fill="#42526b">물리 호스트 4대 · VM 16대 / Ansible Inventory 기준</text>
 <rect x="32" y="100" width="936" height="102" rx="12" fill="#fff" stroke="#ccd7e6"/><rect x="32" y="114" width="4" height="26" rx="2" fill="#2563eb"/>
-<text x="52" y="136" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#2563eb">Ansible controller · 1 VM</text>
-<text x="52" y="166" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Inventory + Playbooks + Roles / configure the VM groups below</text>
+<text x="52" y="136" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#2563eb">Ansible 제어 VM · 1대</text>
+<text x="52" y="166" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Inventory · Playbook · Role로 아래 VM 그룹을 구성</text>
 <rect x="32" y="224" width="456" height="142" rx="12" fill="#fff" stroke="#ccd7e6"/><rect x="32" y="238" width="4" height="26" rx="2" fill="#2563eb"/>
-<text x="52" y="260" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#2563eb">Network · 5 VMs</text>
-<text x="52" y="290" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">4 vRouters: routing and firewall</text>
-<text x="52" y="315" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">1 HAProxy LB: service / API entry</text>
-<text x="52" y="340" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">HTTP(S), Kubernetes API, database</text>
+<text x="52" y="260" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#2563eb">네트워크 · VM 5대</text>
+<text x="52" y="290" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">vRouter 4대: 라우팅·방화벽</text>
+<text x="52" y="315" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">HAProxy LB 1대: 서비스·API 진입점</text>
+<text x="52" y="340" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">HTTP(S) · Kubernetes API · DB</text>
 <rect x="512" y="224" width="456" height="142" rx="12" fill="#fff" stroke="#ccd7e6"/><rect x="512" y="238" width="4" height="26" rx="2" fill="#2563eb"/>
-<text x="532" y="260" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#2563eb">Kubernetes · 5 VMs</text>
-<text x="532" y="290" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">3 control planes + 2 workers</text>
+<text x="532" y="260" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#2563eb">Kubernetes · VM 5대</text>
+<text x="532" y="290" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Control Plane 3대 · Worker 2대</text>
 <text x="532" y="315" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">kubeadm · containerd · Calico VXLAN</text>
-<text x="532" y="340" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Workloads managed by seokpan-gitops</text>
+<text x="532" y="340" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">워크로드는 GitOps 저장소에서 관리</text>
 <rect x="32" y="390" width="456" height="142" rx="12" fill="#fff" stroke="#ccd7e6"/><rect x="32" y="404" width="4" height="26" rx="2" fill="#0f766e"/>
-<text x="52" y="426" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#0f766e">Database · 3 VMs</text>
-<text x="52" y="456" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">MariaDB Primary / Replica</text>
-<text x="52" y="481" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">MaxScale: 1 VM</text>
-<text x="52" y="506" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">DB provisioning, backup and recovery</text>
+<text x="52" y="426" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#0f766e">데이터베이스 · VM 3대</text>
+<text x="52" y="456" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">MariaDB Primary · Replica</text>
+<text x="52" y="481" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">MaxScale 1대</text>
+<text x="52" y="506" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">DB 구성 · 백업 · 복구</text>
 <rect x="512" y="390" width="456" height="142" rx="12" fill="#fff" stroke="#ccd7e6"/><rect x="512" y="404" width="4" height="26" rx="2" fill="#9a4b0a"/>
-<text x="532" y="426" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#9a4b0a">Registry and storage · 2 VMs</text>
-<text x="532" y="456" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Harbor: 1 VM</text>
-<text x="532" y="481" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">NFS: 1 VM</text>
-<text x="532" y="506" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Image registry and persistent volumes</text>
-<text x="32" y="574" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="400" fill="#42526b">Counts describe VM roles, not a network packet path.</text>
-<text x="32" y="600" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="400" fill="#42526b">MVP scope: one LB and one MaxScale; no second instance is shown.</text>
+<text x="532" y="426" font-family="Arial,Helvetica,sans-serif" font-size="20" font-weight="700" fill="#9a4b0a">이미지 저장소·스토리지 · VM 2대</text>
+<text x="532" y="456" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">Harbor 1대</text>
+<text x="532" y="481" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">NFS 1대</text>
+<text x="532" y="506" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#42526b">이미지 보관 · 영속 볼륨</text>
 </svg>
