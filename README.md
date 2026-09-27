@@ -31,8 +31,8 @@ seokpan-infra/
     ├── ansible-safe-run       # 안전 실행 래퍼 스크립트
     ├── bootstrap/             # 최초 실행 준비(컬렉션/버전 락 등)
     ├── inventory/             # hosts.yml, group_vars/, host_vars/
-    ├── playbooks/             # 역할별 실행 진입점 (50개)
-    ├── roles/                 # 기능 단위 자동화 코드 (41개)
+    ├── playbooks/             # 역할별 실행 진입점
+    ├── roles/                 # 기능 단위 자동화 코드
     ├── tools/
     ├── requirements.txt
     └── requirements.yml
@@ -40,7 +40,7 @@ seokpan-infra/
 
 ## 주요 구현 영역
 
-역할(role)이 41개로 세분화되어 있어, 전체 목록 대신 영역별 대표 코드 위치만 안내합니다. 각 역할의 세부 태스크는 링크된 디렉터리에서 직접 확인하세요.
+역할(Role)을 기능 단위로 나누어 관리하므로, 전체 목록 대신 영역별 대표 코드 위치만 안내합니다. 각 역할의 세부 태스크는 링크된 디렉터리에서 직접 확인하세요.
 
 | 영역 | 대표 Role / Playbook | 코드 |
 |---|---|---|
