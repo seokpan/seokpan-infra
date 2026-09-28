@@ -4,6 +4,14 @@
 
 실제 애플리케이션 배포 상태는 [`seokpan-gitops`](https://github.com/seokpan/seokpan-gitops), 애플리케이션 소스는 [`seokpan-app`](https://github.com/seokpan/seokpan-app), 설계·검증 문서는 [`seokpan-docs`](https://github.com/seokpan/seokpan-docs)에서 관리합니다.
 
+## 인프라 구성
+
+![Ansible 관리 대상인 16개 VM의 역할별 구성](docs/images/infrastructure-scope.svg)
+
+[Inventory](ansible/inventory/hosts.yml)에 정의된 16개 VM을 역할별로 묶은 그림입니다. Control Plane 3대·Worker 2대로 Kubernetes를 구성하고, MariaDB·MaxScale·Harbor·NFS는 별도 VM에서 운영합니다. 1차 MVP의 LB와 MaxScale은 각각 1대입니다.
+
+Ansible은 서버와 클러스터 기반을 구성하고, 클러스터에 배포할 애플리케이션·플랫폼 리소스는 `seokpan-gitops`가 관리합니다. 그림은 관리 대상의 구분이며 패킷 경로나 물리 호스트별 배치를 나타내지는 않습니다.
+
 ## 담당과 역할
 
 | 담당자 | 영역 | 주요 작업 |
@@ -23,16 +31,16 @@ seokpan-infra/
     ├── ansible-safe-run       # 안전 실행 래퍼 스크립트
     ├── bootstrap/             # 최초 실행 준비(컬렉션/버전 락 등)
     ├── inventory/             # hosts.yml, group_vars/, host_vars/
-    ├── playbooks/             # 역할별 실행 진입점 (50개)
-    ├── roles/                 # 기능 단위 자동화 코드 (41개)
+    ├── playbooks/             # 역할별 실행 진입점
+    ├── roles/                 # 기능 단위 자동화 코드
     ├── tools/
     ├── requirements.txt
     └── requirements.yml
 ```
 
-## 주요 구현 영역
+## 핵심 기술과 구현 영역
 
-역할(role)이 41개로 세분화되어 있어, 전체 목록 대신 영역별 대표 코드 위치만 안내합니다. 각 역할의 세부 태스크는 링크된 디렉터리에서 직접 확인하세요.
+VMware·CentOS Stream 9 VM을 Ansible로 구성하고, HAProxy·kubeadm·containerd·Calico·MariaDB·MaxScale·NFS를 영역별 Role로 관리합니다. 전체 목록 대신 대표 코드 위치만 안내합니다. 각 Role의 세부 태스크는 링크된 디렉터리에서 확인할 수 있습니다.
 
 | 영역 | 대표 Role / Playbook | 코드 |
 |---|---|---|
