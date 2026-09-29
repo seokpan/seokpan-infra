@@ -81,7 +81,7 @@ cd ansible
 
 `db_operator_login.yml`의 전용 수동 경로와 일부 비지원 테스트는 Runner의 `MANUAL_ONLY`·`UNSUPPORTED_SPECIAL_TESTS` 및 역할별 Runbook을 확인합니다. 모든 Playbook을 같은 실행 예시로 일괄 치환하지 않습니다. 또한 `--check --diff`를 무해한 공통 검사로 취급하지 않습니다. `check_mode: false` 태스크는 Check Mode에서도 실행될 수 있고 Diff는 민감 정보를 노출할 수 있습니다([Ansible 공식 안내](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_checkmode.html)).
 
-Vault 입력 파일은 `ansible/inventory/group_vars/all/vault.yml`이며, `ansible/`에서의 상대 경로는 `inventory/group_vars/all/vault.yml`입니다. 실제 비밀번호·Token·Private Key는 Git과 로그에 평문으로 남기지 않습니다. CA 파일·Kubernetes Secret·실행 Credential의 공급 위치는 각 Role의 계약을 따르며 모두 Vault 파일에만 저장된다고 가정하지 않습니다. `no_log`·`diff: false` 등 보호와 `.gitignore`는 적용 범위를 확인하고 사용합니다.
+Vault 입력 파일은 `ansible/inventory/group_vars/all/vault.yml`이며, `ansible/`에서의 상대 경로는 `inventory/group_vars/all/vault.yml`입니다. 실제 비밀번호·Token·Private Key는 Git과 로그에 평문으로 남기지 않습니다. CA 파일·Kubernetes Secret·실행 Credential의 공급 위치는 각 Role에 정의된 공급 경로를 따르며 모두 Vault 파일에만 저장된다고 가정하지 않습니다. `no_log`·`diff: false` 등 보호와 `.gitignore`는 적용 범위를 확인하고 사용합니다.
 
 ## 저장소 간 관계
 
