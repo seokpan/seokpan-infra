@@ -5,7 +5,7 @@
 이 Bootstrap은 기존 System Python 및 System Ansible을 변경하지 않고,
 프로젝트 전용 Python 3.12 기반 Ansible 실행 환경을 생성하기 위한 용도입니다.
 
-기존 System 환경은 Rollback 용도로 유지합니다.
+기존 System 환경은 Rollback 용도로 유지합니다. 이 문서의 작업 디렉터리는 저장소 루트가 아니라 `seokpan-infra/ansible/`입니다. VM 생성·System Python 설치·인프라 Playbook 적용은 이 Bootstrap의 수행 범위가 아닙니다.
 
 ## Version Matrix
 
@@ -13,6 +13,9 @@
 - ansible-core: 2.20.8
 - Python kubernetes client: 36.0.3
 - kubernetes.core: 6.5.0
+- ansible.mariadb: 6.0.2
+
+현재 잠금 값은 [`requirements.txt`](../requirements.txt), [`requirements.yml`](../requirements.yml)과 [`version_lock_bootstrap.sh`](version_lock_bootstrap.sh)를 함께 확인합니다. 아래 목록은 해당 파일의 기준을 설명하며 별도 업그레이드 지시가 아닙니다.
 
 ## 기존 System 환경
 
@@ -39,7 +42,7 @@ Python 3.12.13
 
 ## 필수 파일
 
-프로젝트 최상위 디렉터리에 다음 파일이 있어야 합니다.
+`seokpan-infra/ansible/`에 다음 파일이 있어야 합니다.
 
 ```text
 requirements.txt
@@ -61,11 +64,14 @@ kubernetes==36.0.3
 collections:
   - name: kubernetes.core
     version: "6.5.0"
+
+  - name: ansible.mariadb
+    version: "6.0.2"
 ```
 
 ## Bootstrap 실행
 
-프로젝트 최상위 디렉터리에서 다음 명령을 실행합니다.
+`seokpan-infra/ansible/`에서 다음 명령을 실행합니다.
 
 ```bash
 chmod +x bootstrap/version_lock_bootstrap.sh
@@ -78,13 +84,13 @@ Bootstrap은 다음 작업을 수행합니다.
 2. 프로젝트 전용 `.venv`를 생성하거나 기존 환경을 재사용합니다.
 3. `requirements.txt`의 Python 패키지를 설치합니다.
 4. 프로젝트 전용 Ansible Collection을 설치합니다.
-5. 설치된 패키지와 Collection 버전을 검증합니다.
+5. 설치된 패키지와 두 Collection의 버전을 검증합니다.
 
 버전이 지정된 값과 다르면 Bootstrap은 오류를 출력하고 중단됩니다.
 
 ## 프로젝트 환경 사용
 
-Bootstrap이 정상적으로 완료되면 다음 명령을 실행합니다.
+Bootstrap이 정상적으로 완료되면 같은 `ansible/` 디렉터리에서 다음 명령을 실행합니다.
 
 ```bash
 source .venv/bin/activate
@@ -101,6 +107,8 @@ ansible --version
 python -c 'import kubernetes; print(kubernetes.__version__)'
 ansible-galaxy collection list --collections-path "$PWD/.ansible/collections"
 ```
+
+이 명령은 실행환경 확인용이며 대상 VM 적용 성공을 의미하지 않습니다. 사용자별 최초 준비·Credential 등록·실제 Playbook 진입점은 [저장소 실행 안내](../../README.md#실행-방법)의 `ars-setup`·`credential-init`·`ansible-safe-run` 경로를 따릅니다. Runner에서 차단된 작업을 일반 `ansible-playbook`으로 우회하지 않습니다.
 
 ## 프로젝트 환경 종료
 
@@ -126,7 +134,7 @@ ansible --version
 ## 주요 디렉터리
 
 ```text
-.
+ansible/
 ├── .venv/                         # 프로젝트 전용 Python 가상환경
 ├── .ansible/
 │   └── collections/               # 프로젝트 전용 Ansible Collections
