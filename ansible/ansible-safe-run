@@ -709,7 +709,18 @@ def engine(root,pb,args,secrets,private,mode):
         sudo_checker=plugins.become_loader.get('sudo')
         def missing_become(result):
             data=getattr(result,'_result',{}) or {}
-            text='\n'.join(str(data.get(k,'')) for k in ('msg','stderr','module_stderr','module_stdout','exception'))
+            def collect_text(item):
+                if not isinstance(item,dict):
+                    return ''
+                parts=[
+                    str(item.get(k,''))
+                    for k in ('msg','stderr','module_stderr','module_stdout','exception')
+                ]
+                nested=item.get('results',[])
+                if isinstance(nested,list):
+                    parts.extend(collect_text(child) for child in nested)
+                return '\n'.join(parts)
+            text=collect_text(data)
             output=text.encode('utf-8','replace')
             try: native=bool(sudo_checker and sudo_checker.check_missing_password(output))
             except Exception: native=False
