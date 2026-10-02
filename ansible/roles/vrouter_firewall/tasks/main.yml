@@ -446,3 +446,51 @@
           - "--add-rich-rule={{ selective_masquerade_rule }}"
       when: selective_masquerade_check.rc == 1
       notify: Reload firewalld
+
+# ============================================================
+# 작성자: 최유준 / 작성 날짜: 2026/09/17 (#205 대응 블록 추가)
+# node_exporter(9100/tcp)를 K8s worker 대역에서만 external zone에
+# 최소 허용. install_node_exporter_external.yml은 internal zone만
+# 허용하므로, 실제 트래픽이 유입되는 external zone에는 이 role에서
+# 함께 관리해야 VRouter 재구축 시에도 재발하지 않음.
+# ============================================================
+ 
+    # ========================================================
+    # 3-10. Node Exporter(9100/tcp) Worker 대역 최소 허용
+    # ========================================================
+ 
+    - name: Check node_exporter rich rule for worker CIDRs
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - >-
+            --query-rich-rule=rule family="ipv4"
+            source address="{{ item }}"
+            port protocol="tcp" port="{{ node_exporter_port }}"
+            accept
+      loop: "{{ worker_allow_cidrs }}"
+      loop_control:
+        label: "{{ item }}"
+      register: node_exporter_rule_check
+      changed_when: false
+      failed_when: node_exporter_rule_check.rc not in [0, 1]
+ 
+    - name: Add node_exporter rich rule for worker CIDRs
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --permanent
+          - "--zone={{ external_zone }}"
+          - >-
+            --add-rich-rule=rule family="ipv4"
+            source address="{{ item.item }}"
+            port protocol="tcp" port="{{ node_exporter_port }}"
+            accept
+      loop: "{{ node_exporter_rule_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc == 1
+      notify: Reload firewalld
+ 

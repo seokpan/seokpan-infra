@@ -49,14 +49,13 @@
 
 - name: install manifest에서 argocd-cm·argocd-server Deployment 문서 제외 (필드 소유권 순환 방지)
   # argocd-cm: resource.exclusions 필드 순환 (#198 리뷰 반영, 기존 해결)
-  # argocd-server Deployment: spec.replicas 필드가 install.yaml에는 없어
-  # 매 실행마다 동일 field_manager의 재apply로 소유권이 탈락→재획득을 반복하던 문제 (신규 발견)
+  # argocd-cmd-params-cm: server.insecure 필드 순환 (#117, 동일 원인으로 신규 추가)
   ansible.builtin.set_fact:
     argocd_install_docs_no_cm: >-
       {{ (argocd_install_docs_all
           | rejectattr('kind', 'in', ['ConfigMap', 'Deployment']) | list)
          + (argocd_install_docs_all | selectattr('kind', 'equalto', 'ConfigMap')
-            | rejectattr('metadata.name', 'equalto', 'argocd-cm') | list)
+            | rejectattr('metadata.name', 'in', ['argocd-cm', 'argocd-cmd-params-cm']) | list)
          + (argocd_install_docs_all | selectattr('kind', 'equalto', 'Deployment')
             | rejectattr('metadata.name', 'equalto', 'argocd-server') | list) }}
   delegate_to: localhost
@@ -102,6 +101,39 @@
   loop: "{{ argocd_large_crds }}"
   register: argocd_large_crd_check
   failed_when: argocd_large_crd_check.resources | length == 0
+  delegate_to: localhost
+  become: false
+
+- name: argocd-cmd-params-cm 원본 정의 추출 (install manifest 내 해당 문서만)
+  ansible.builtin.set_fact:
+    argocd_cmd_params_cm_original_def: >-
+      {{ (lookup('file', argocd_manifest_local_path) | from_yaml_all | list)
+         | selectattr('kind', 'defined')
+         | selectattr('kind', 'equalto', 'ConfigMap')
+         | selectattr('metadata.name', 'equalto', 'argocd-cmd-params-cm')
+         | first }}
+  delegate_to: localhost
+  become: false
+
+- name: "argocd-cmd-params-cm server.insecure 병합 SSA (#117)"
+  # seokpan-gateway가 TLS를 Terminate 모드로 종료한 뒤 argocd-server에는 평문 HTTP로
+  # 전달하는 구조(webhook 노출용)이므로, argocd-server가 평문 요청에 307 리다이렉트를
+  # 돌려주지 않도록 server.insecure=true를 명시한다.
+  # argocd-server Deployment 생성보다 먼저 적용 — env는 configMapKeyRef로 Pod 기동
+  # 시점에만 주입되므로, 최초 bootstrap 시 이 순서를 지켜야 재시작 없이 정상 기동한다.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ argocd_field_manager }}"
+    definition: >-
+      {{ argocd_cmd_params_cm_original_def
+         | combine({
+             'metadata': {'namespace': argocd_namespace},
+             'data': {'server.insecure': 'true'}
+           }, recursive=true) }}
+  register: argocd_cmd_params_cm_apply_result
   delegate_to: localhost
   become: false
 
@@ -152,6 +184,38 @@
     - argocd-server
     - argocd-repo-server
     - argocd-applicationset-controller
+  delegate_to: localhost
+  become: false
+
+- name: argocd-server 재시작 (server.insecure 변경 반영 — ConfigMap 변경은 실행 중 Pod에 자동 반영되지 않음)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    state: patched
+    kind: Deployment
+    name: argocd-server
+    namespace: "{{ argocd_namespace }}"
+    definition:
+      spec:
+        template:
+          metadata:
+            annotations:
+              kubectl.kubernetes.io/restartedAt: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+  when: argocd_cmd_params_cm_apply_result.changed
+  delegate_to: localhost
+  become: false
+
+- name: argocd-server 재시작 후 Ready 재대기
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ argocd_kubeconfig }}"
+    kind: Deployment
+    namespace: "{{ argocd_namespace }}"
+    name: argocd-server
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ argocd_ready_timeout }}"
+  when: argocd_cmd_params_cm_apply_result.changed
   delegate_to: localhost
   become: false
 

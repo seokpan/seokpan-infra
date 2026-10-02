@@ -100,3 +100,18 @@ backend maxscale
 {% for server in haproxy_maxscale %}
     server {{ server.name }} {{ server.address }}:{{ server.port }} check
 {% endfor %}
+
+{% if haproxy_stats_enabled | default(false) %}
+# ============================================================
+# HAProxy Native Prometheus Metrics
+# {{ haproxy_stats_bind_address }}:{{ haproxy_stats_port }}
+# ============================================================
+
+frontend stats
+    bind {{ haproxy_stats_bind_address }}:{{ haproxy_stats_port }}
+    mode http
+    http-request use-service prometheus-exporter if { path /metrics }
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+{% endif %}

@@ -1,0 +1,7 @@
+---
+maxscale_exporter_rest_url: "http://127.0.0.1:8989/v1"
+maxscale_exporter_rest_admin_user: admin
+maxscale_exporter_rest_username: maxscale_exporter
+# Vault 변수(group_vars/all/vault.yml)로 공급:
+#   maxscale_exporter_password    - 생성할 read-only REST 계정 비밀번호
+#   maxscale_rest_admin_password  - REST API admin 비밀번호

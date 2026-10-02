@@ -1,430 +1,105 @@
 # seokpan-infra
 
-**SeokPan 프로젝트의 서버, 네트워크, 데이터베이스 및 Kubernetes 기반 인프라를 자동으로 구성하고 관리하는 저장소입니다.**
+**「石나가는 판단(Seokpan)」 프로젝트의 서버·네트워크·데이터베이스·Kubernetes 기반 인프라를 Ansible로 자동화하는 저장소입니다.** 온프레미스 VMware/CentOS Stream 9 환경(4 PC, 다수 VM) 위에 라우팅/방화벽부터 K8s 클러스터, MariaDB/MaxScale, NFS, 백업·DR, Observability Exporter까지 코드로 관리합니다.
 
-이 저장소에서는 서버에 필요한 기본 설정부터 Kubernetes, 데이터베이스, 네트워크, 백업 등의 인프라를 **Ansible 코드로 관리하고 자동화**합니다.
+실제 애플리케이션 배포 상태는 [`seokpan-gitops`](https://github.com/seokpan/seokpan-gitops), 애플리케이션 소스는 [`seokpan-app`](https://github.com/seokpan/seokpan-app), 설계·검증 문서는 [`seokpan-docs`](https://github.com/seokpan/seokpan-docs)에서 관리합니다.
 
-> 쉽게 말하면, 사람이 서버에 하나씩 접속해서 설정하는 작업을 코드로 만들어
-> **같은 환경을 반복해서 만들고, 수정하고, 다시 확인할 수 있도록 관리하는 저장소**입니다.
+## 인프라 구성
 
----
+![Ansible 관리 대상인 16개 VM의 역할별 구성](docs/images/infrastructure-scope.svg)
 
-## 📑 목차
+[Inventory](ansible/inventory/hosts.yml)에 정의된 16개 VM을 역할별로 묶은 그림입니다. Control Plane 3대·Worker 2대로 Kubernetes를 구성하고, MariaDB·MaxScale·Harbor·NFS는 별도 VM에서 운영합니다. 1차 MVP의 LB와 MaxScale은 각각 1대입니다.
 
-1. [프로젝트 소개](#-프로젝트-소개)
-2. [전체 인프라 구성](#-전체-인프라-구성)
-3. [인프라 구성 요소](#-인프라-구성-요소)
-4. [Ansible 자동화](#-ansible-자동화)
-5. [저장소 구성](#-저장소-구성)
-6. [관련 문서](#-관련-문서)
-7. [보안 관리](#-보안-관리)
-8. [작업 방법](#-작업-방법)
+Ansible은 서버와 클러스터 기반을 구성하고, 클러스터에 배포할 애플리케이션·플랫폼 리소스는 `seokpan-gitops`가 관리합니다. 그림은 관리 대상의 구분이며 패킷 경로나 물리 호스트별 배치를 나타내지는 않습니다.
 
----
+## 담당과 역할
 
-## 📌 프로젝트 소개
+| 담당자 | 영역 | 주요 작업 |
+|---|---|---|
+| **정태훈** (팀장) | Kubernetes, 코드 리뷰 | `kubeadm_*`, `container_runtime`, `calico`, `k8s_addons` |
+| **이유빈** | Network / Ansible 실행환경 | `vrouter_network`, `vrouter_firewall`, `lb_network`, `lb_haproxy`, `common_hosts` |
+| **최유준** | Harbor / Argo CD / CI/CD / Observability, `internal_ca`·`tls_deploy` 소유 | `harbor`, `argocd_bootstrap`, `internal_ca`, `tls_deploy`, VRouter·Controller Exporter 적용·관측 연동 |
+| **김상희** | Data, Storage & Recovery | `mariadb*`, `maxscale*`, `nfs_server`, `backup_transfer`, `etcd_dr`, DB·NFS Exporter Role |
 
-SeokPan 프로젝트는 **실시간 투표형 웹게임 오목 서비스**를 컨테이너 환경에서 운영하기 위한 인프라를 구축하는 프로젝트입니다.
+Exporter Role 구현과 대상 VM 적용·관측 연동은 구분합니다. `node_exporter_linux`·`mysqld_exporter`의 Role Owner와 [VRouter·Controller 적용 Playbook](ansible/playbooks/install_node_exporter_external.yml)의 작성·적용 범위가 다르므로, Exporter 전체를 한 담당자의 단독 작업으로 묶지 않습니다. 구체적인 구현·실행·리뷰 근거는 해당 Role과 Issue/PR을 따릅니다.
 
-`seokpan-infra`는 이 서비스가 실행될 수 있도록 필요한 **서버와 인프라 환경을 구성하고 관리**합니다.
-
-주요 관리 대상은 다음과 같습니다.
-
-| 구분                | 관리 내용                           |
-| ----------------- | ------------------------------- |
-| 서버                | Linux 서버 기본 설정 및 공통 환경          |
-| 네트워크              | 서버 간 통신 및 네트워크 환경               |
-| Load Balancer     | HAProxy, Keepalived 기반 이중화      |
-| Kubernetes        | Control Plane, Worker 및 클러스터 구성 |
-| Container Runtime | containerd 기반 컨테이너 실행 환경        |
-| 데이터베이스            | MariaDB Primary / Replica 구성    |
-| DB Proxy          | MaxScale 구성 및 관리                |
-| 저장소               | NFS 기반 저장 공간                    |
-| 백업                | 데이터베이스 및 시스템 백업                 |
-| 보안                | 인증서, 계정, 권한 및 보안 설정             |
-| 자동화               | Ansible을 이용한 반복 작업 자동화          |
-
-### 이 저장소의 목적
-
-이 저장소의 가장 중요한 목적은 다음과 같습니다.
-
-* 서버를 같은 방법으로 구성할 수 있도록 만들기
-* 반복해서 해야 하는 작업을 자동화하기
-* 설정 변경 내용을 코드로 남기기
-* 서버 장애나 재구축 상황에서도 빠르게 환경을 다시 만들 수 있도록 하기
-* 사람이 직접 작업하면서 발생할 수 있는 실수를 줄이기
-
----
-
-## 🏗️ 전체 인프라 구성
-
-SeokPan 프로젝트의 전체 인프라는 여러 서버와 가상머신으로 구성되어 있습니다.
-
-먼저 전체적인 구조를 이미지로 확인할 수 있습니다.
-
-### 논리적인 전체 구성
-
-![SeokPan 논리 아키텍처](https://raw.githubusercontent.com/seokpan/seokpan-docs/main/logical-architecture/01_SeokPan_전체%20논리%20아키텍처.png)
-
-논리 아키텍처에서는 **사용자의 요청이 네트워크와 Kubernetes를 거쳐 애플리케이션과 데이터베이스로 전달되는 전체 흐름**을 확인할 수 있습니다.
-
-### 실제 서버 구성
-
-![SeokPan 물리 아키텍처](https://raw.githubusercontent.com/seokpan/seokpan-docs/main/physical-architecture/01_SeokPan_전체%20물리%20아키텍처.png)
-
-물리 아키텍처에서는 실제 환경에서 **어떤 서버와 가상머신에 각 기능이 배치되어 있는지** 확인할 수 있습니다.
-
-현재 설계는 4대의 물리 서버와 여러 가상머신을 사용하는 구조입니다.
-
----
-
-## 🧩 인프라 구성 요소
-
-전체 인프라는 크게 다음과 같이 나누어져 있습니다.
-
-### 네트워크
-
-서버와 Kubernetes 노드가 서로 통신할 수 있도록 네트워크를 구성합니다.
-
-* VRouter
-* 내부 네트워크
-* 외부 네트워크
-* 공통 VIP
-* 서버 간 통신 환경
-
-### Load Balancer
-
-외부에서 들어오는 요청을 Kubernetes 환경으로 전달합니다.
-
-* HAProxy
-* Keepalived
-* VIP 기반 이중화
-
-한 대의 Load Balancer에 문제가 발생하더라도 다른 Load Balancer를 사용할 수 있도록 구성합니다.
-
-### Kubernetes
-
-애플리케이션을 실행하는 컨테이너 환경입니다.
-
-* Control Plane 3대
-* Worker 2대
-* containerd
-* Calico
-
-Kubernetes 관련 상세 구성은 GitOps 저장소와 함께 관리합니다.
-
-### 데이터베이스
-
-서비스에서 사용하는 데이터를 저장합니다.
-
-* MariaDB Primary
-* MariaDB Replica
-* MaxScale
-
-Primary 데이터베이스에 문제가 발생했을 때 Replica를 활용할 수 있도록 구성하고 있습니다.
-
-### 저장소 및 백업
-
-데이터와 백업 파일을 별도의 저장 공간에 보관합니다.
-
-* NFS
-* MariaDB 백업
-* etcd Snapshot
-* 백업 파일 보관 및 복구
-
-### CI/CD 및 서비스 운영
-
-애플리케이션을 빌드하고 Kubernetes에 배포하기 위한 환경도 함께 구성합니다.
-
-* Jenkins
-* Harbor
-* Argo CD
-* Prometheus
-* Grafana
-* Loki
-* Alloy
-* Alertmanager
-
-Jenkins와 Argo CD의 Kubernetes 배포 내용은 `seokpan-gitops`에서 관리하고, 컨테이너 이미지는 외부 Harbor에서 관리합니다.
-
----
-
-## ⚙️ Ansible 자동화
-
-이 저장소의 핵심은 **Ansible을 이용한 인프라 자동화**입니다.
-
-서버에 직접 접속해서 명령어를 하나씩 입력하는 대신, Ansible Playbook을 실행하여 필요한 설정을 자동으로 적용합니다.
-
-기본적인 작업 흐름은 다음과 같습니다.
-
-```text
-Inventory
-   ↓
-Playbook
-   ↓
-Role
-   ↓
-서버 설정
-   ↓
-구성 결과 확인
-```
-
-### Inventory
-
-어떤 서버에 작업할 것인지 관리합니다.
-
-```text
-ansible/inventory/
-├── hosts.yml
-├── group_vars/
-└── host_vars/
-```
-
-서버의 역할과 필요한 변수 등을 이곳에서 관리합니다.
-
-### Playbook
-
-실제로 어떤 작업을 할 것인지 정의합니다.
-
-```text
-ansible/playbooks/
-```
-
-예를 들어 다음과 같은 작업을 Playbook으로 관리합니다.
-
-* 서버 기본 설정
-* 시간 동기화
-* Container Runtime 설치
-* Kubernetes 구성
-* 인증서 배포
-* 데이터베이스 구성
-* 백업 구성
-* MaxScale 구성
-* Harbor 구성
-* Argo CD 초기 구성
-
-### Role
-
-여러 서버에서 반복해서 사용하는 작업을 기능별로 나누어 관리합니다.
-
-```text
-ansible/roles/
-```
-
-Role을 사용하면 같은 작업을 여러 서버에서 다시 사용할 수 있습니다.
-
-### 자동화 작업의 기본 원칙
-
-Ansible 작업은 다음 순서로 진행하는 것을 기본으로 합니다.
-
-```text
-작업 실행
-   ↓
-구성 변경
-   ↓
-상태 확인
-   ↓
-정상 동작 확인
-```
-
-단순히 명령어가 성공하는 것만 확인하지 않고, **실제로 원하는 상태가 되었는지 확인하는 것**을 중요하게 생각합니다.
-
----
-
-## 📁 저장소 구성
-
-주요 디렉터리는 다음과 같습니다.
+## 저장소 구조
 
 ```text
 seokpan-infra/
-├── .github/
-│   ├── ISSUE_TEMPLATE/
-│   └── pull_request_template.md
-│
-├── ansible/
-│   ├── bootstrap/
-│   ├── inventory/
-│   ├── playbooks/
-│   ├── roles/
-│   └── ansible.cfg
-│
-├── .gitignore
-└── README.md
+├── .github/                  # Issue/PR 템플릿
+├── docs/images/              # 인프라 구성도
+└── ansible/
+    ├── ansible.cfg
+    ├── ansible-safe-run       # 안전 실행 래퍼 스크립트
+    ├── bootstrap/             # 최초 실행 준비(컬렉션/버전 락 등)
+    ├── inventory/             # hosts.yml, group_vars/, host_vars/
+    ├── playbooks/             # 역할별 실행 진입점
+    ├── roles/                 # 기능 단위 자동화 코드
+    ├── tools/
+    ├── requirements.txt
+    └── requirements.yml
 ```
 
-### 디렉터리 역할
+## 핵심 기술과 구현 영역
 
-| 경로                   | 설명                         |
-| -------------------- | -------------------------- |
-| `.github/`           | Issue 및 Pull Request 작성 규칙 |
-| `ansible/inventory/` | 서버 목록과 서버별 설정              |
-| `ansible/playbooks/` | 실제 자동화 작업                  |
-| `ansible/roles/`     | 기능별 Ansible 작업             |
-| `ansible/bootstrap/` | Ansible 작업을 시작하기 위한 초기 설정  |
-| `README.md`          | 저장소 전체 설명                  |
+VMware·CentOS Stream 9 VM을 Ansible로 구성하고, HAProxy·kubeadm·containerd·Calico·MariaDB·MaxScale·NFS를 영역별 Role로 관리합니다. 전체 목록 대신 대표 코드 위치만 안내합니다. 각 Role의 세부 태스크는 링크된 디렉터리에서 확인할 수 있습니다.
 
----
+| 영역 | 대표 Role / Playbook | 코드 |
+|---|---|---|
+| 네트워크 · LB | `vrouter_network`, `vrouter_firewall`, `lb_haproxy`, `resolver_policy`, `coredns_records` | [roles/](ansible/roles) |
+| Kubernetes 부트스트랩 | `kubernetes_prereq`, `container_runtime`, `calico`, `kubeadm_control_plane(_join)`, `kubeadm_worker`, `k8s_addons` | [roles/](ansible/roles) |
+| 인증서 · TLS | `internal_ca`, `tls_deploy`, `ca_trust`, `certbot_client`, `gateway_tls` | [roles/](ansible/roles) |
+| 데이터베이스 (김상희) | `mariadb`, `mariadb_account`, `mariadb_database`, `mariadb_user`, `maxscale` | [roles/mariadb](ansible/roles/mariadb), [roles/maxscale](ansible/roles/maxscale) |
+| 백업 · DR (김상희) | `backup_transfer`, `etcd_dr`, `etcd_tools` | [playbooks/mariadb_dr_recovery.yml](ansible/playbooks/mariadb_dr_recovery.yml), [playbooks/mariadb_restore_chain.yml](ansible/playbooks/mariadb_restore_chain.yml), [playbooks/etcd_dr_recovery.yml](ansible/playbooks/etcd_dr_recovery.yml) |
+| 저장소 (김상희) | `nfs_server` | [roles/nfs_server](ansible/roles/nfs_server) |
+| CI/CD 연동 시크릿 | `harbor`, `jenkins_secrets`, `argocd_bootstrap`, `argocd_webhook_secret`, `application_registry_secret`, `backend_db_secrets` | [roles/](ansible/roles) |
+| Observability | `node_exporter_linux`, `mysqld_exporter`, `maxscale_exporter`, `alertmanager_secret` | [roles/](ansible/roles) |
 
-## 🔗 저장소별 역할
+> DB Primary/Replica처럼 실행 중 바뀔 수 있는 상태는 기록 시점과 실제 작업 시점을 구분합니다. [1차 종료 시점 상태](https://github.com/seokpan/seokpan-docs/blob/main/CURRENT_STATE.md)와 관련 실행 근거를 먼저 읽고, 변경 작업 전에는 대상 서버의 현재 역할을 다시 확인합니다. 과거 스냅샷을 현재 Runtime 조회로 대신하지 않습니다.
 
-SeokPan 프로젝트는 하나의 저장소에서 모든 것을 관리하지 않습니다.
+## 실행 방법
 
-각 저장소가 담당하는 역할을 나누어 관리합니다.
+작업 디렉터리는 저장소 루트 아래의 `ansible/`입니다. Controller에 고정 버전 Python이 준비되어 있어야 하며, 실행환경만 구성·검증하는 방법은 [Bootstrap 안내](ansible/bootstrap/README.md)를 따릅니다.
 
-| 저장소              | 담당 내용                          |
-| ---------------- | ------------------------------ |
-| `seokpan-infra`  | 서버와 인프라 구성 및 Ansible 자동화       |
-| `seokpan-gitops` | Kubernetes에 배포할 상태와 Argo CD 설정 |
-| `seokpan-app`    | 실제 웹게임 애플리케이션                  |
-| `seokpan-docs`   | 프로젝트 설계, 구조, 테스트 및 검증 문서       |
+허용 사용자 `ansible`·`jth`·`ksh`·`cyj`가 자신의 checkout을 처음 준비할 때는 다음 진입점을 사용합니다. `ars-setup`은 `root` 또는 `sudo` 실행을 거부하며, Project 환경 준비·Kernel Keyring Credential 등록·`ars` alias 등록을 수행합니다.
 
-간단하게 보면 다음과 같습니다.
-
-```text
-seokpan-app
-    │
-    │ 애플리케이션 코드
-    ↓
-seokpan-gitops
-    │
-    │ Kubernetes 배포 상태
-    ↓
-Kubernetes
-
-seokpan-infra
-    │
-    │ 서버 / 네트워크 / DB / Kubernetes 기반 환경
-    ↓
-Infrastructure
-
-seokpan-docs
-    │
-    └── 설계 / 테스트 / 검증 / 변경 기록
+```bash
+cd ansible
+./tools/ars-setup
 ```
 
----
+이미 준비된 사용자 환경에서 Credential만 다시 등록해야 할 때는 [`./tools/credential-init`](ansible/tools/credential-init)을 사용합니다. 두 스크립트는 `source`로 실행하지 않고, Credential을 명령행 인자로 전달하지 않습니다.
 
-## 📚 관련 문서
+일반 Playbook 실행의 진입점은 [`ansible-safe-run`](ansible/ansible-safe-run)입니다. 다음은 선택한 Playbook을 Ansible로 해석하는 예시이며 `<playbook>`은 검토한 실제 파일명으로 바꿉니다.
 
-인프라의 자세한 설계와 테스트 방법은 `seokpan-docs`에서 관리합니다.
-
-README에서는 전체 내용을 설명하지 않고, 필요한 경우 상세 문서로 이동할 수 있도록 연결합니다.
-
-### 🏗️ 아키텍처
-
-* 전체 논리 아키텍처
-* 전체 물리 아키텍처
-* 기술 선택 및 구성 이유
-
-### ⚙️ Ansible
-
-* Ansible 자동화 설계
-* 자동화 테스트 방법
-* 서버 구성 기준
-
-### 🧪 검증 및 운영
-
-* MVP 구현 기준
-* 프로젝트 변경 기록
-* 백업 및 복구
-* 장애 대응 및 검증 자료
-
-> 인프라의 **실제 코드와 자동화 작업은 `seokpan-infra`**,
-> 인프라를 **왜 이렇게 구성했는지에 대한 설명과 검증 내용은 `seokpan-docs`**에서 확인할 수 있습니다.
-
----
-
-## 🔐 보안 관리
-
-서버 구성에 필요한 비밀번호, 인증서, 개인키 등의 민감한 정보는 Git 저장소에 그대로 저장하지 않습니다.
-
-특히 다음과 같은 정보는 주의해서 관리합니다.
-
-* 서버 계정 비밀번호
-* 데이터베이스 비밀번호
-* API Token
-* TLS Private Key
-* Kubernetes 인증 정보
-* 기타 개인 인증 정보
-
-Ansible에서 필요한 민감한 정보는 가능한 경우 **Ansible Vault를 사용하여 암호화된 상태로 관리**합니다.
-
-또한 `.gitignore`를 사용하여 작업 중 생성되는 민감한 파일이나 로컬 전용 파일이 저장소에 올라가지 않도록 관리합니다.
-
----
-
-## 🔄 작업 방법
-
-인프라 변경 작업은 다음과 같은 흐름으로 진행합니다.
-
-```text
-Issue 등록
-   ↓
-작업 브랜치 생성
-   ↓
-Ansible 코드 수정
-   ↓
-서버에서 테스트
-   ↓
-결과 확인
-   ↓
-Commit
-   ↓
-Pull Request
-   ↓
-코드 리뷰
-   ↓
-Merge
-   ↓
-main 반영
+```bash
+./ansible-safe-run playbooks/<playbook>.yml --inspect-only
 ```
 
-### 작업할 때 중요하게 보는 것
+`--inspect-only`는 대상 접속·Check Mode·실제 적용 성공을 의미하지 않습니다. 실제 적용은 대상·옵션·변경 영향·복구 경로를 검토하고 Runner의 사전 검사와 승인 절차를 통과한 뒤 진행합니다. 현재 Revision에서 정책상 차단되는 실행은 직접 `ansible-playbook`으로 우회하지 않습니다.
 
-**1. 먼저 작업 내용을 정합니다.**
+`db_operator_login.yml`의 전용 수동 경로와 일부 비지원 테스트는 Runner의 `MANUAL_ONLY`·`UNSUPPORTED_SPECIAL_TESTS` 및 역할별 Runbook을 확인합니다. 모든 Playbook을 같은 실행 예시로 일괄 치환하지 않습니다. 또한 `--check --diff`를 무해한 공통 검사로 취급하지 않습니다. `check_mode: false` 태스크는 Check Mode에서도 실행될 수 있고 Diff는 민감 정보를 노출할 수 있습니다([Ansible 공식 안내](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_checkmode.html)).
 
-무엇을 변경하고 왜 변경하는지 Issue에 남깁니다.
+Vault 입력 파일은 `ansible/inventory/group_vars/all/vault.yml`이며, `ansible/`에서의 상대 경로는 `inventory/group_vars/all/vault.yml`입니다. 실제 비밀번호·Token·Private Key는 Git과 로그에 평문으로 남기지 않습니다. CA 파일·Kubernetes Secret·실행 Credential의 공급 위치는 각 Role에 정의된 공급 경로를 따르며 모두 Vault 파일에만 저장된다고 가정하지 않습니다. `no_log`·`diff: false` 등 보호와 `.gitignore`는 적용 범위를 확인하고 사용합니다.
 
-**2. 작업 브랜치에서 수정합니다.**
+## 저장소 간 관계
 
-`main`에서 바로 수정하지 않고 별도의 작업 브랜치를 사용합니다.
+| 저장소 | 역할 |
+|---|---|
+| `seokpan-infra` | 서버 / 네트워크 / DB / K8s 부트스트랩 자동화 (본 저장소) |
+| `seokpan-gitops` | Kubernetes Desired State, Argo CD |
+| `seokpan-app` | 애플리케이션 소스 (Frontend/Backend) |
+| `seokpan-docs` | 아키텍처 설계, 트러블슈팅, 검증 기록 |
 
-**3. 실제 서버에서 테스트합니다.**
+## 관련 문서 (`seokpan-docs`)
 
-Ansible 코드가 정상적으로 실행되는지 확인합니다.
+- [논리 아키텍처](https://github.com/seokpan/seokpan-docs/tree/main/logical-architecture) · [물리 아키텍처](https://github.com/seokpan/seokpan-docs/tree/main/physical-architecture)
+- [MVP 구현 기준](https://github.com/seokpan/seokpan-docs/blob/main/MVP_IMPLEMENTATION_BASELINE.md)
+- [프로젝트 변경 기록](https://github.com/seokpan/seokpan-docs/blob/main/PROJECT_CHANGES.md)
+- [트러블슈팅 모음](https://github.com/seokpan/seokpan-docs/tree/main/troubleshooting)
+- [GitHub 협업 및 Repository 운영](<https://github.com/seokpan/seokpan-docs/tree/main/10_GitHub_협업_및_Repository_운영>)
 
-**4. 결과를 확인합니다.**
+## 작업 방법
 
-명령어가 성공했다는 것뿐만 아니라 실제 서버 상태가 원하는 결과인지 확인합니다.
-
-**5. Pull Request로 검토합니다.**
-
-변경 내용을 다른 팀원이 확인할 수 있도록 PR을 생성합니다.
-
-**6. 검토가 끝난 후 main에 반영합니다.**
-
-검증이 완료된 코드만 `main`에 반영합니다.
-
----
-
-## 🎯 정리
-
-`seokpan-infra`는 SeokPan 프로젝트에서 사용하는 **서버와 인프라를 코드로 관리하는 저장소**입니다.
-
-단순히 서버를 만드는 것에 그치지 않고,
-
-```text
-서버 구성
-  ↓
-자동화
-  ↓
-반복 실행
-  ↓
-상태 확인
-  ↓
-변경 기록
-```
-
-이 가능한 환경을 만드는 것을 목표로 합니다.
-
-이를 통해 새로운 서버를 구성하거나 기존 서버를 다시 구성해야 할 때도 **같은 코드를 사용하여 동일한 환경을 만들 수 있도록 관리**합니다.
+Issue 등록 → 작업 브랜치 → 변경 범위에 맞는 검증 → 작은 단위 PR → 리뷰 → `main` merge 순으로 진행합니다. 문서·주석 변경에는 Source·diff 대조를, 실제 인프라 변경에는 승인된 대상의 적용·회귀검증을 기록합니다. 브랜치 생성/커밋/push 등 Git 조작은 팀원이 직접 수행하고, PR/Issue 본문은 사전 확인 후 등록하는 것을 원칙으로 합니다.

@@ -89,3 +89,5 @@ project_endpoints:
 # Gateway는 공개 Browser와 Linux VM이 공통 신뢰하는 ACME 인증서를 사용한다.
 # DB·Harbor 등 내부 Endpoint의 Seokpan Internal CA는 유지한다.
 gateway_tls_source: "external_acme"
+
+github_gitops_bot_username: "seokpan-ci-bot"
