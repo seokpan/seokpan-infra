@@ -48,7 +48,7 @@ KEYCTL_ENV = {
 # Human-reviewed check_mode:false evidence at repository snapshot below.
 # Evidence is bound to
 # file content and exact Task identity; any relevant edit invalidates it.
-REVIEW_BASE_COMMIT = '65c8ec490d9a933cac83b142d4b7d7266e524709'
+REVIEW_BASE_COMMIT = '41fc8f76b09aacc0062cc98bd0f8350fc806da6d'
 REVIEWED_CHECK_FALSE = {
     'roles/chrony/tasks/main.yml': {
         'sha256':'8b013525877d7bd59d244238991847ebdd3fa929367a21fb18afd94a051569bf',
@@ -184,16 +184,6 @@ REVIEWED_CHECK_FALSE = {
             (175,'Read DNS search domains after reconciliation','command'),
             (198,'Read static hostname after reconciliation','command'),
             (207,'Read resolver search domains after reconciliation','command'),
-        }},
-    'playbooks/ssh_public_key_recovery.yml': {
-        'sha256':'d00a5e7fe39862cc5ce69d09778ee836215a7d64036e620ea8f8f52e80ca0480',
-        'tasks':{
-            (104,'Check controller users','command'),
-            (252,'Derive public key from each private key','command'),
-            (359,'Check SSH port from Ansible Controller','wait_for'),
-            (382,'Test existing SSH access for each controller user','command'),
-            (526,"Check whether failed user's public key already exists",'command'),
-            (636,'Verify SSH access after recovery','command'),
         }},
 }
 CHILD = None
