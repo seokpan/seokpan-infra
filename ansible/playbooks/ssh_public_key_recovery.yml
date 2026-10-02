@@ -1,0 +1,727 @@
+---
+# ============================================================
+# SSH Public Key Recovery
+# ============================================================
+# 작성자: 이유빈
+# 작성일: 2026/08/27
+# 수정일: 2026/09/30
+# 수정 내용: SSH 호스트 키 안전 검증 및 누락 공개 키 선택적 복구 로직 보완
+# 수정일: 2026/10/02
+# 수정 내용: Safe Runner 실제 지원 범위에 맞춰 Bootstrap 진입 경로 및 멱등성 설명 보완
+# ============================================================
+# SSH Public Key Recovery
+# ============================================================
+#
+# 목적:
+# Snapshot Rollback 등으로 대상 VM의 root authorized_keys에서
+# Ansible Controller 사용자 공개키가 사라진 경우
+# 필요한 사용자의 공개키만 복구한다.
+#
+# 대상 사용자:
+# - ansible
+# - jth
+# - ksh
+# - cyj
+#
+# 핵심 멱등성:
+#
+# 1. 사용자 자신의 SSH Key로 실제 로그인을 먼저 검사한다.
+#
+# 2. SSH 로그인이 정상이라면:
+#    → 해당 사용자의 공개키 배포 Task를 SKIP한다.
+#
+# 3. Public Key 인증이 실패한 경우에만:
+#    → 해당 사용자의 공개키를 root authorized_keys에 보장한다.
+#
+# 4. 동일 공개키가 이미 존재하면:
+#    → ansible.builtin.lineinfile의 state=present 동작으로
+#      중복 추가하지 않는다.
+#
+# 보안 기준:
+#
+# - 개인키는 원격 VM으로 복사하지 않는다.
+# - root 비밀번호는 YAML/Git에 저장하지 않는다.
+# - 기존 공개키를 삭제하지 않는다.
+# - 기존 SSH Key를 새로 생성하거나 덮어쓰지 않는다.
+# - SSH Host Key 변경을 자동으로 무시하거나 삭제하지 않는다.
+# - Network/sshd 문제를 SSH Key 문제로 오판하여 수정하지 않는다.
+# - 현재 Inventory의 원격 SSH 관리 대상 Host만 대상으로 하고 local connection Host는 제외한다.
+#
+# 복구 전제:
+#
+# 대상 VM에는 Safe Runner에서 사용할 수 있는
+# 검증된 Bootstrap SSH 진입 경로가 남아 있어야 한다.
+#
+# - 예: 기존 Ansible SSH Key를 이용한 root SSH 접속
+# - Safe Runner가 차단하는 -k / ask_pass 방식은 이 실행 경로에서 사용하지 않는다.
+#
+# 실행 위치:
+# Ansible Controller
+# ============================================================
+
+
+# ============================================================
+# PLAY 1
+# Ansible Controller의 사용자와 SSH Key를 검증한다.
+#
+# 이 Play에서는 원격 VM을 변경하지 않는다.
+# ============================================================
+
+- name: Validate SSH keys on Ansible Controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+
+    # --------------------------------------------------------
+    # Ansible Controller에서 관리하는 팀 사용자 목록
+    #
+    # 사용자 목록을 여기 한 곳에서만 관리한다.
+    # --------------------------------------------------------
+    controller_users:
+      - name: ansible
+        private_key: /home/ansible/.ssh/id_rsa
+        public_key: /home/ansible/.ssh/id_rsa.pub
+
+      - name: jth
+        private_key: /home/jth/.ssh/id_rsa
+        public_key: /home/jth/.ssh/id_rsa.pub
+
+      - name: ksh
+        private_key: /home/ksh/.ssh/id_rsa
+        public_key: /home/ksh/.ssh/id_rsa.pub
+
+      - name: cyj
+        private_key: /home/cyj/.ssh/id_rsa
+        public_key: /home/cyj/.ssh/id_rsa.pub
+
+  tasks:
+
+    # --------------------------------------------------------
+    # 1. Controller 사용자 존재 여부 확인
+    #
+    # 사용자가 없다면 SSH Key 복구를 시작하지 않는다.
+    # --------------------------------------------------------
+    - name: Check controller users
+      ansible.builtin.command:
+        argv:
+          - id
+          - -u
+          - "{{ item.name }}"
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: controller_user_checks
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+
+    - name: Fail when a controller user is missing
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: >-
+          Ansible Controller에 {{ item.item.name }} 사용자가 없습니다.
+          SSH Public Key Recovery를 중단합니다.
+      loop: "{{ controller_user_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 2. 개인키 존재 여부/상태 확인
+    #
+    # root 권한으로 파일 Metadata만 검사한다.
+    # 개인키를 변경하지 않는다.
+    # --------------------------------------------------------
+    - name: Check controller private key files
+      ansible.builtin.stat:
+        path: "{{ item.private_key }}"
+        follow: false
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      become: true
+      register: controller_private_key_stats
+
+
+    # --------------------------------------------------------
+    # 개인키 보안 기준:
+    #
+    # - 존재해야 함
+    # - 일반 파일이어야 함
+    # - Symbolic Link가 아니어야 함
+    # - 본인 소유여야 함
+    # - 권한은 0400 또는 0600
+    # --------------------------------------------------------
+    - name: Validate controller private key files
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists | default(false)
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          - (item.stat.pw_name | default('')) == item.item.name
+          - (item.stat.mode | default('')) in ['0400', '0600']
+        fail_msg: >-
+          {{ item.item.name }} 사용자의 개인키
+          {{ item.item.private_key }} 상태가 안전하지 않습니다.
+          파일 존재 여부, Symbolic Link 여부, 소유자, 권한을 확인하세요.
+      loop: "{{ controller_private_key_stats.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 3. 공개키 존재 여부/상태 확인
+    # --------------------------------------------------------
+    - name: Check controller public key files
+      ansible.builtin.stat:
+        path: "{{ item.public_key }}"
+        follow: false
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      become: true
+      register: controller_public_key_stats
+
+
+    - name: Validate controller public key files
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists | default(false)
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          - (item.stat.pw_name | default('')) == item.item.name
+          - (item.stat.mode | default('')) in ['0600', '0644']
+        fail_msg: >-
+          {{ item.item.name }} 사용자의 공개키
+          {{ item.item.public_key }} 상태가 올바르지 않습니다.
+          파일 존재 여부, Symbolic Link 여부, 소유자, 권한을 확인하세요.
+      loop: "{{ controller_public_key_stats.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 4. 공개키 내용만 읽는다.
+    #
+    # 개인키는 원격 VM으로 전달하지 않는다.
+    # --------------------------------------------------------
+    - name: Read controller public keys
+      ansible.builtin.slurp:
+        src: "{{ item.public_key }}"
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      become: true
+      register: controller_public_keys
+
+
+    # --------------------------------------------------------
+    # 5. 사용자명 → 공개키 Dictionary 생성
+    #
+    # 예:
+    #
+    # ssh_recovery_public_keys:
+    #   ansible: "ssh-rsa AAAA..."
+    #   cyj:     "ssh-rsa BBBB..."
+    # --------------------------------------------------------
+    - name: Build controller public key dictionary
+      ansible.builtin.set_fact:
+        ssh_recovery_public_keys: >-
+          {{
+            ssh_recovery_public_keys | default({})
+            | combine({
+                item.item.name:
+                (item.content | b64decode | trim)
+              })
+          }}
+      loop: "{{ controller_public_keys.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 6. 개인키에서 대응 공개키를 계산한다.
+    #
+    # ssh-keygen -y:
+    # 개인키에 대응하는 공개키를 출력한다.
+    #
+    # 기존 Key를 새로 만들거나 수정하지 않는다.
+    # --------------------------------------------------------
+    - name: Derive public key from each private key
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/runuser
+          - -u
+          - "{{ item.name }}"
+          - --
+          - /usr/bin/ssh-keygen
+          - -y
+          - -P
+          - ""
+          - -f
+          - "{{ item.private_key }}"
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      become: true
+      become_user: root
+      register: derived_public_keys
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+
+    # --------------------------------------------------------
+    # 7. id_rsa ↔ id_rsa.pub가 실제 한 쌍인지 확인
+    #
+    # 공개키의:
+    #   Key Type + Key Body
+    #
+    # 두 부분만 비교한다.
+    #
+    # Comment는 비교하지 않는다.
+    # --------------------------------------------------------
+    - name: Validate private and public key pair
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - "item.stdout.split()[0:2] == ssh_recovery_public_keys[item.item.name].split()[0:2]"
+        fail_msg: >-
+          {{ item.item.name }} 사용자의
+          id_rsa와 id_rsa.pub가 서로 일치하지 않거나
+          개인키를 읽을 수 없습니다.
+          기존 SSH Key를 덮어쓰지 말고 상태를 확인하세요.
+        success_msg: >-
+          {{ item.item.name }} SSH Key Pair 정상
+      loop: "{{ derived_public_keys.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 8. PLAY 2에서도 사용할 사용자 목록을 Fact로 유지
+    # --------------------------------------------------------
+    - name: Store verified controller users
+      ansible.builtin.set_fact:
+        ssh_recovery_users: "{{ controller_users }}"
+
+
+# ============================================================
+# PLAY 2
+# 대상 VM의 실제 SSH 상태를 검사하고
+# 공개키가 실제로 누락된 경우에만 복구한다.
+# ============================================================
+
+- name: Recover only confirmed missing SSH public keys
+  hosts: all
+  gather_facts: false
+
+  # 한 서버씩 처리하여 변경 범위를 제한한다.
+  serial: 1
+
+  # 보안 또는 판정 오류가 발생하면 전체 작업을 중단한다.
+  any_errors_fatal: true
+
+  # 현재 Inventory 기준 원격 관리 계정은 root다.
+  remote_user: root
+
+  vars:
+    controller_users: "{{ hostvars['localhost']['ssh_recovery_users'] }}"
+
+    ssh_target: >-
+      {{
+        ansible_host
+        | default(inventory_hostname)
+      }}
+
+  pre_tasks:
+
+    # --------------------------------------------------------
+    # Controller처럼 local connection인 Host는
+    # 원격 SSH Public Key Recovery 대상이 아니다.
+    # --------------------------------------------------------
+    - name: Exclude local connection hosts from SSH Public Key Recovery
+      ansible.builtin.meta: end_host
+      when:
+        - (ansible_connection | default('ssh')) == 'local'
+
+
+  tasks:
+
+    # --------------------------------------------------------
+    # 9. TCP/22 확인
+    #
+    # SSH Port 자체가 열리지 않으면
+    # 공개키 문제로 판단하지 않는다.
+    # --------------------------------------------------------
+    - name: Check SSH port from Ansible Controller
+      ansible.builtin.wait_for:
+        host: "{{ ssh_target }}"
+        port: 22
+        timeout: 5
+        state: started
+      delegate_to: localhost
+      become: false
+      check_mode: false
+
+
+    # --------------------------------------------------------
+    # 10. 사용자별 기존 Public Key SSH 로그인 검사
+    #
+    # Ansible의 become_user로 일반 사용자 사이를 직접
+    # 전환하지 않는다.
+    #
+    # 검증된 구조:
+    # ansible -> root -> runuser -> controller user
+    #
+    # StrictHostKeyChecking=yes:
+    # 처음 보는 Host나 변경된 Host Key를 자동 등록/우회하지 않는다.
+    # --------------------------------------------------------
+    - name: Test existing SSH access for each controller user
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/runuser
+          - -u
+          - "{{ item.name }}"
+          - --
+          - /usr/bin/ssh
+          - -F
+          - /dev/null
+          - -i
+          - "{{ item.private_key }}"
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - IdentityAgent=none
+          - -o
+          - BatchMode=yes
+          - -o
+          - PasswordAuthentication=no
+          - -o
+          - PreferredAuthentications=publickey
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=yes
+          - -o
+          - UpdateHostKeys=no
+          - -o
+          - "UserKnownHostsFile=/home/{{ item.name }}/.ssh/known_hosts"
+          - "root@{{ ssh_target }}"
+          - "true"
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }} -> root@{{ ssh_target }}"
+      delegate_to: localhost
+      become: true
+      become_user: root
+      register: ssh_access_before
+      failed_when: false
+      changed_when: false
+
+      # 이 SSH 명령은 상태를 변경하지 않는 검사이므로
+      # Safe Runner의 Check Mode에서도 실제 실행한다.
+      check_mode: false
+
+
+    # --------------------------------------------------------
+    # 11. Host Key 변경은 즉시 중단
+    #
+    # known_hosts를 자동 삭제하거나 교체하지 않는다.
+    # --------------------------------------------------------
+    - name: Stop when SSH host identity changed
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.name }} -> root@{{ ssh_target }}
+          접속에서 SSH Host Key 변경이 감지되었습니다.
+          known_hosts를 자동 변경하지 않습니다.
+          대상 VM의 실제 Host Key를 사람이 먼저 확인해야 합니다.
+      when:
+        - item.rc != 0
+        - >-
+          'REMOTE HOST IDENTIFICATION HAS CHANGED'
+          in (item.stderr | default(''))
+      loop: "{{ ssh_access_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 12. 처음 보는 Host Key도 자동 등록하지 않고 중단
+    # --------------------------------------------------------
+    - name: Stop when SSH host key is unknown
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.name }} -> root@{{ ssh_target }}
+          접속에서 검증된 Host Key를 찾지 못했습니다.
+          공개키 누락으로 판단하지 않습니다.
+          known_hosts를 자동 등록하지 않습니다.
+      when:
+        - item.rc != 0
+        - >-
+          (
+            'No host key is known'
+            in (item.stderr | default(''))
+          )
+          or
+          (
+            'Host key verification failed'
+            in (item.stderr | default(''))
+          )
+      loop: "{{ ssh_access_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 13. 인증 문제가 아닌 SSH 실패는 중단
+    #
+    # Network / Firewall / sshd 오류를
+    # 공개키 누락으로 처리하지 않는다.
+    # --------------------------------------------------------
+    - name: Stop on non-authentication SSH failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.name }} -> root@{{ ssh_target }}
+          SSH 접속 실패가 Public Key 인증 실패로
+          판단되지 않습니다.
+
+          stderr:
+          {{ item.stderr | default('') }}
+
+          Network, Firewall, sshd 또는 SSH 설정을
+          먼저 확인해야 합니다.
+      when:
+        - item.rc != 0
+        - >-
+          'Permission denied'
+          not in (item.stderr | default(''))
+        - >-
+          'REMOTE HOST IDENTIFICATION HAS CHANGED'
+          not in (item.stderr | default(''))
+        - >-
+          'No host key is known'
+          not in (item.stderr | default(''))
+        - >-
+          'Host key verification failed'
+          not in (item.stderr | default(''))
+      loop: "{{ ssh_access_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+
+    # --------------------------------------------------------
+    # 14. 인증 실패 사용자의 Public Key가 실제 존재하는지 확인
+    #
+    # 공개키 Comment가 아니라 Key Body를 검색한다.
+    #
+    # rc=0 → 동일 Key 존재
+    # rc=1 → 동일 Key 없음
+    # 그 외 → authorized_keys 확인 실패
+    #
+    # 읽기 전용 검사이므로 Check Mode에서도 실행한다.
+    # --------------------------------------------------------
+    - name: Check whether failed user's public key already exists
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/grep
+          - -F
+          - -q
+          - --
+          - >-
+            {{
+              hostvars['localhost']['ssh_recovery_public_keys']
+              [item.item.name].split()[1]
+            }}
+          - /root/.ssh/authorized_keys
+      when:
+        - item.rc != 0
+        - >-
+          'Permission denied'
+          in (item.stderr | default(''))
+      loop: "{{ ssh_access_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }} -> root@{{ ssh_target }}"
+      register: authorized_key_probe
+      failed_when: false
+      changed_when: false
+      check_mode: false
+
+
+    # --------------------------------------------------------
+    # 15. authorized_keys를 정상 확인하지 못하면 중단
+    # --------------------------------------------------------
+    - name: Stop when authorized_keys inspection failed
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.item.name }} -> root@{{ ssh_target }}
+          authorized_keys 상태를 정상적으로 확인하지 못했습니다.
+          공개키를 임의로 추가하지 않습니다.
+      when:
+        - not (item.skipped | default(false))
+        - item.rc not in [0, 1]
+      loop: "{{ authorized_key_probe.results | default([]) }}"
+      loop_control:
+        label: >-
+          {{
+            item.item.item.name
+            if not (item.skipped | default(false))
+            else 'SKIPPED'
+          }}
+
+
+    # --------------------------------------------------------
+    # 16-1. SSH는 실패했지만 같은 Public Key가 이미 있으면 중단
+    #
+    # 공개키 누락 문제가 아니므로 중복 추가하지 않는다.
+    # --------------------------------------------------------
+    - name: Stop when authentication failed but public key already exists
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.item.name }} -> root@{{ ssh_target }}
+          SSH 인증은 실패했지만 동일 Public Key가
+          authorized_keys에 이미 존재합니다.
+          공개키를 다시 추가하지 않습니다.
+      when:
+        - not (item.skipped | default(false))
+        - item.rc == 0
+      loop: "{{ authorized_key_probe.results | default([]) }}"
+      loop_control:
+        label: >-
+          {{
+            item.item.item.name
+            if not (item.skipped | default(false))
+            else 'SKIPPED'
+          }}
+
+
+    # --------------------------------------------------------
+    # 16-2. 실제 누락된 Public Key만 추가
+    #
+    # grep rc=1 → 해당 Key가 실제 없음
+    #
+    # lineinfile:
+    # → 기존 authorized_keys를 보존
+    # → 필요한 공개키 한 줄만 추가
+    # → 동일한 전체 Line 중복 추가 방지
+    # --------------------------------------------------------
+    - name: Restore only confirmed missing public key
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        state: present
+        line: >-
+          {{
+            hostvars['localhost']['ssh_recovery_public_keys']
+            [item.item.item.name]
+          }}
+        insertafter: EOF
+        create: false
+      when:
+        - not (item.skipped | default(false))
+        - item.rc == 1
+      loop: "{{ authorized_key_probe.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item.name }} -> root@{{ ssh_target }}"
+      register: ssh_key_restore
+
+
+    # --------------------------------------------------------
+    # 17. 실제 적용 후 네 사용자의 SSH를 다시 검증
+    #
+    # Check Mode에서는 Key를 실제 추가하지 않았으므로
+    # 이 검증을 실행하지 않는다.
+    # --------------------------------------------------------
+    - name: Verify SSH access after recovery
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/runuser
+          - -u
+          - "{{ item.name }}"
+          - --
+          - /usr/bin/ssh
+          - -F
+          - /dev/null
+          - -i
+          - "{{ item.private_key }}"
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - IdentityAgent=none
+          - -o
+          - BatchMode=yes
+          - -o
+          - PasswordAuthentication=no
+          - -o
+          - PreferredAuthentications=publickey
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=yes
+          - -o
+          - UpdateHostKeys=no
+          - -o
+          - "UserKnownHostsFile=/home/{{ item.name }}/.ssh/known_hosts"
+          - "root@{{ ssh_target }}"
+          - "true"
+      loop: "{{ controller_users }}"
+      loop_control:
+        label: "{{ item.name }} -> root@{{ ssh_target }}"
+      delegate_to: localhost
+      become: true
+      become_user: root
+      register: ssh_access_after
+      failed_when: false
+      changed_when: false
+      check_mode: false
+      when:
+        - not ansible_check_mode
+
+
+    # --------------------------------------------------------
+    # 18. 최종 SSH 검증
+    # --------------------------------------------------------
+    - name: Fail when SSH recovery verification failed
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: >-
+          {{ item.item.name }} 사용자가
+          root@{{ ssh_target }} 로 SSH 접속하지 못했습니다.
+          복구 후 검증에 실패했습니다.
+        success_msg: >-
+          {{ item.item.name }} -> root@{{ ssh_target }} SSH 정상
+      loop: "{{ ssh_access_after.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - not ansible_check_mode
+
+
+    # --------------------------------------------------------
+    # 19. 최종 결과 표시
+    #
+    # 처음부터 SSH 성공:
+    # → SKIP
+    #
+    # 처음 인증 실패 + 실제 Key 누락 + 복구 + 재검증 성공:
+    # → CHANGED
+    # --------------------------------------------------------
+    - name: Show final SSH Public Key Recovery result
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.name }} -> root@{{ ssh_target }} :
+          {{
+            'SKIP - 기존 SSH 정상, 공개키 변경 없음'
+            if item.rc == 0
+            else
+            'CHANGED - 실제 누락 Public Key 추가 및 SSH 재검증 완료'
+          }}
+      loop: "{{ ssh_access_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - not ansible_check_mode
