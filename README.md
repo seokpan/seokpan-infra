@@ -58,6 +58,8 @@ VMware·CentOS Stream 9 VM을 Ansible로 구성하고, HAProxy·kubeadm·contain
 
 > DB Primary/Replica처럼 실행 중 바뀔 수 있는 상태는 기록 시점과 실제 작업 시점을 구분합니다. [1차 종료 시점 상태](https://github.com/seokpan/seokpan-docs/blob/main/CURRENT_STATE.md)와 관련 실행 근거를 먼저 읽고, 변경 작업 전에는 대상 서버의 현재 역할을 다시 확인합니다. 과거 스냅샷을 현재 Runtime 조회로 대신하지 않습니다.
 
+> 1차 프로젝트의 종료 판정과 미검증 경계는 [공용 CURRENT_STATE](https://github.com/seokpan/seokpan-docs/blob/main/CURRENT_STATE.md)의 13절을 따릅니다. Infra의 #24·#27·#115·#142·#143과 PR #222는 2026-10-04 확인 시점에 Open이며, 각 담당자의 실제 완료 조건을 남긴 채 유지합니다. 1차 종료가 이 작업들의 완료나 자동 2차 이관을 의미하지 않습니다.
+
 ## 실행 방법
 
 작업 디렉터리는 저장소 루트 아래의 `ansible/`입니다. Controller에 고정 버전 Python이 준비되어 있어야 하며, 실행환경만 구성·검증하는 방법은 [Bootstrap 안내](ansible/bootstrap/README.md)를 따릅니다.
